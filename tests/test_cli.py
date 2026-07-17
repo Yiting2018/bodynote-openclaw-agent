@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import io
+import json
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+
+from bodynote_agent.cli import main
+
+
+class CliTest(unittest.TestCase):
+    def test_init_and_json_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / "runtime"
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["--home", str(home), "init"]), 0)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    main(["--home", str(home), "status", "--json"]),
+                    0,
+                )
+
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["development_phase"], "m7-release-ready")
+            self.assertIn("checkin.text", payload["capabilities"])
+            self.assertIn("events.delete", payload["capabilities"])
+            self.assertIn("gap-check", payload["capabilities"])
+
+    def test_text_checkin_and_event_list(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / "runtime"
+            with redirect_stdout(io.StringIO()):
+                main(["--home", str(home), "init"])
+
+            checkin_output = io.StringIO()
+            with redirect_stdout(checkin_output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "checkin",
+                        "--text",
+                        "今天走了8000步",
+                        "--idempotency-key",
+                        "message-1",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            checkin = json.loads(checkin_output.getvalue())
+            self.assertEqual(checkin["event"]["payload"]["steps"], 8000)
+
+            events_output = io.StringIO()
+            with redirect_stdout(events_output):
+                code = main(["--home", str(home), "events", "--json"])
+            self.assertEqual(code, 0)
+            events = json.loads(events_output.getvalue())
+            self.assertEqual(events["count"], 1)
+
+    def test_structured_checkin_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / "runtime"
+            event_file = root / "event.json"
+            event_file.write_text(
+                json.dumps(
+                    {
+                        "event_type": "body",
+                        "occurred_at": "2026-07-16T08:00:00+08:00",
+                        "payload": {"weight_kg": 61.2},
+                        "idempotency_key": "structured-1",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                main(["--home", str(home), "init"])
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "checkin",
+                        "--input",
+                        str(event_file),
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["event"]["payload"]["weight_kg"], 61.2)
+
+    def test_event_update_and_soft_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / "runtime"
+            patch_file = root / "patch.json"
+            patch_file.write_text(
+                json.dumps({"payload": {"steps": 9200}}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                main(["--home", str(home), "init"])
+
+            created_output = io.StringIO()
+            with redirect_stdout(created_output):
+                main(
+                    [
+                        "--home",
+                        str(home),
+                        "checkin",
+                        "--text",
+                        "今天走了8000步",
+                        "--json",
+                    ]
+                )
+            event_id = json.loads(created_output.getvalue())["event"]["id"]
+
+            updated_output = io.StringIO()
+            with redirect_stdout(updated_output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "event",
+                        "update",
+                        event_id,
+                        "--input",
+                        str(patch_file),
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            updated = json.loads(updated_output.getvalue())
+            self.assertEqual(updated["event"]["payload"]["steps"], 9200)
+            self.assertEqual(updated["event"]["revision"], 2)
+
+            deleted_output = io.StringIO()
+            with redirect_stdout(deleted_output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "event",
+                        "delete",
+                        event_id,
+                        "--confirm",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(deleted_output.getvalue())["deleted"])
+
+    def test_onboarding_gap_check_and_schedule_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / "runtime"
+            setup_file = root / "setup.json"
+            setup_file.write_text(
+                json.dumps(
+                    {
+                        "primary_goal": "规律运动",
+                        "schedule": {"gap_check_time": "20:40"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                main(["--home", str(home), "init"])
+
+            onboarding_output = io.StringIO()
+            with redirect_stdout(onboarding_output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "onboarding",
+                        "configure",
+                        "--input",
+                        str(setup_file),
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertTrue(
+                json.loads(onboarding_output.getvalue())["onboarding_completed"]
+            )
+
+            gap_output = io.StringIO()
+            with redirect_stdout(gap_output):
+                code = main(
+                    [
+                        "--home",
+                        str(home),
+                        "gap-check",
+                        "--date",
+                        "2026-07-16",
+                        "--json",
+                    ]
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(len(json.loads(gap_output.getvalue())["prompts"]), 3)
+
+            plan_output = io.StringIO()
+            with redirect_stdout(plan_output):
+                code = main(
+                    ["--home", str(home), "schedule", "plan", "--json"]
+                )
+            self.assertEqual(code, 0)
+            jobs = json.loads(plan_output.getvalue())["jobs"]
+            self.assertEqual(jobs[0]["schedule"], "40 20 * * *")
+            self.assertTrue(jobs[0]["ready"])
+
+
+
+if __name__ == "__main__":
+    unittest.main()

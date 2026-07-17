@@ -1,0 +1,7 @@
+[app]
+profile_id = "owner"
+language = "zh-CN"
+
+[privacy]
+allow_network_serving = false
+allow_third_party_delivery = false

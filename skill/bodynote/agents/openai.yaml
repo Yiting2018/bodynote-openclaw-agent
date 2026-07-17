@@ -1,0 +1,7 @@
+interface:
+  display_name: "BodyNote Health"
+  short_description: "本地健康记录、洞察、报告与安全交付"
+  default_prompt: "Use $bodynote to review local health records and generate a concise report."
+
+policy:
+  allow_implicit_invocation: true
