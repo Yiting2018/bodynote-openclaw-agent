@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -106,6 +106,24 @@ CREATE TABLE IF NOT EXISTS report_runs (
     UNIQUE(profile_id, report_type, period_key)
 );
 
+CREATE TABLE IF NOT EXISTS reference_guides (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_uri TEXT,
+    version TEXT,
+    scope_json TEXT NOT NULL DEFAULT '[]',
+    rules_json TEXT NOT NULL DEFAULT '[]',
+    citations_json TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_reference_guides_enabled
+    ON reference_guides(profile_id, enabled, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id TEXT PRIMARY KEY,
     profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
@@ -199,6 +217,30 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_audit_target
         ON audit_log(profile_id, target_type, target_id, created_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reference_guides (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_uri TEXT,
+            version TEXT,
+            scope_json TEXT NOT NULL DEFAULT '[]',
+            rules_json TEXT NOT NULL DEFAULT '[]',
+            citations_json TEXT NOT NULL DEFAULT '[]',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_reference_guides_enabled
+        ON reference_guides(profile_id, enabled, updated_at DESC)
         """
     )
 

@@ -17,7 +17,7 @@ Use the local `bodynote-agent` runtime for deterministic storage, scoring, safet
 
 ## Workflow
 
-1. Identify the task: onboarding, check-in, correction, gap check, dashboard, report, insight, or export.
+1. Identify the task: onboarding, check-in, correction, gap check, dashboard, report, reference guide, insight, or export.
 2. Confirm that the required runtime capability is available.
 3. Preserve the user's date, time, units, uncertainty, and original wording when structuring a record.
 4. Ask only for missing fields that materially affect the requested result.
@@ -25,8 +25,9 @@ Use the local `bodynote-agent` runtime for deterministic storage, scoring, safet
 6. Require explicit user confirmation before updating or deleting an event.
 7. Generate deterministic score and confidence data before composing an explanation.
 8. Keep status, evidence, uncertainty, and next action separate.
-9. Save private records and generated artifacts locally.
-10. Return a short text summary plus artifact paths for OpenClaw to deliver.
+9. Describe cross-domain findings as association clues or synchronous changes, never as proven causality.
+10. Save private records and generated artifacts locally.
+11. Return a short text summary plus artifact paths for OpenClaw to deliver.
 
 For a scheduled gap check, run `bodynote-agent gap-check` without `--json` so a command job can announce the concise owner-facing prompt. Use `--json` when the Agent needs structured missing-category data.
 
@@ -38,12 +39,17 @@ For report delivery, run `report generate` with `--delivery-dir .bodynote-delive
 - Read `references/health-model.md` when structuring records, calculating health state, or generating insights.
 - Read `references/reports.md` when generating the cockpit, daily report, weekly report, monthly report, or mobile artifact.
 - Read `references/scheduling.md` for first-use setup, gap checks, report timing, and delivery behavior.
+- Read `references/guides.md` when the owner uploads or selects a health or training guide.
 - Read `references/maintenance.md` for backup, restore, privacy audit, migration, and release behavior.
 
 ## Safety
 
 - Do not diagnose disease, prescribe treatment, change medication, or promise causality.
 - Never fabricate missing measurements, dates, foods, exercises, symptoms, or report findings.
+- Never present a cycle forecast as contraception, diagnosis, or a guaranteed date.
+- Show cycle support only when the owner explicitly enables tracking. Prefer the
+  owner's repeated performance, recovery, and symptom pattern over phase-wide claims;
+  never claim that a phase automatically reduces muscle gain or requires lower intensity.
 - Treat missing data as lower confidence, not automatically poor health.
 - Escalate urgent symptoms or self-harm risk before continuing ordinary tracking.
 - Never send the SQLite database, raw record directory, or unrelated health history as a report attachment.
@@ -56,3 +62,6 @@ For report delivery, run `report generate` with `--delivery-dir .bodynote-delive
 - Keep daily guidance short and concrete.
 - Use green for on track, yellow for mild deviation, red for attention, blue for neutral data, and purple/pink for cycle context.
 - Show both health state and data completeness whenever a score is presented.
+- Keep score components visible in static PNG/PDF reports. Activity basis should
+  distinguish daily movement, duration, resistance frequency/volume, and recorded
+  intensity; nutrition basis should distinguish targets, nutrient coverage, and food diversity.

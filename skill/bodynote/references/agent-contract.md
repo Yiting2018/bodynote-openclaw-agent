@@ -17,7 +17,7 @@ Run:
 bodynote-agent status --json
 ```
 
-The response declares available capabilities. Invoke only listed capabilities. The release runtime exposes initialization, event management, onboarding, gap checks, deterministic analysis, reports, dashboard generation, schedule planning, backups, privacy audit, and release packaging.
+The response declares available capabilities. Invoke only listed capabilities. The release runtime exposes initialization, event management, onboarding, gap checks, deterministic analysis, reports, dashboard generation, structured reference cards, schedule planning, backups, privacy audit, and release packaging.
 
 ## Check-In Command Contract
 
@@ -105,6 +105,8 @@ bodynote-agent gap-check --date 2026-07-16 --json
 ```
 
 The result separates `required`, `completed`, `missing`, `not_planned`, and `not_applicable`. It asks for at most three missing categories and always returns `report_can_continue: true` after onboarding.
+When cycle tracking is enabled, the result also contains `cycle_forecast`. Announce an
+upcoming reminder only when `reminder_due` is true and preserve its disclaimer.
 
 Build, but do not install, the OpenClaw schedule:
 
@@ -140,6 +142,15 @@ Refresh the local static cockpit with:
 
 ```bash
 bodynote-agent dashboard build --json
+```
+
+Store a structured guide card only after the owner approves the source and extracted
+summary:
+
+```bash
+bodynote-agent reference add --input /local/path/guide-card.json --json
+bodynote-agent reference list --enabled-only --json
+bodynote-agent reference disable <guide-id> --json
 ```
 
 ## Failure Behavior

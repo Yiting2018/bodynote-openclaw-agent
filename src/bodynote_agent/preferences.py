@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from contextlib import closing
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -205,6 +205,7 @@ def _normalize_configuration(
     profile_data = data.get("profile", current["profile"]["details"])
     if not isinstance(profile_data, dict):
         raise ValueError("profile 必须是 JSON object。")
+    profile_data = _validate_profile_details(profile_data)
     timezone_name = str(data.get("timezone", current["profile"]["timezone"])).strip()
     _validate_timezone(timezone_name)
 
@@ -290,6 +291,39 @@ def _validate_timezone(value: str) -> None:
         ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError):
         raise ValueError(f"未知的 IANA 时区：{value}。") from None
+
+
+def _validate_profile_details(value: dict[str, Any]) -> dict[str, Any]:
+    details = dict(value)
+    if "birth_date" in details:
+        try:
+            parsed = date.fromisoformat(str(details["birth_date"]))
+        except ValueError:
+            raise ValueError("profile.birth_date 必须是 YYYY-MM-DD。") from None
+        if parsed >= date.today() or parsed.year < 1900:
+            raise ValueError("profile.birth_date 超出合理范围。")
+        details["birth_date"] = parsed.isoformat()
+    if "height_cm" in details:
+        height = details["height_cm"]
+        if isinstance(height, bool) or not isinstance(height, (int, float)) or not 80 <= height <= 250:
+            raise ValueError("profile.height_cm 必须是 80-250 之间的数值。")
+    if "daily_calorie_target_kcal" in details:
+        calories = details["daily_calorie_target_kcal"]
+        if isinstance(calories, bool) or not isinstance(calories, (int, float)) or not 500 <= calories <= 10000:
+            raise ValueError("profile.daily_calorie_target_kcal 必须是 500-10000 之间的数值。")
+    if "daily_protein_target_g" in details:
+        protein = details["daily_protein_target_g"]
+        if isinstance(protein, bool) or not isinstance(protein, (int, float)) or not 10 <= protein <= 500:
+            raise ValueError("profile.daily_protein_target_g 必须是 10-500 之间的数值。")
+    if "cycle_tracking_enabled" in details and not isinstance(
+        details["cycle_tracking_enabled"], bool
+    ):
+        raise ValueError("profile.cycle_tracking_enabled 必须是布尔值。")
+    if "cycle_reminder_days_before" in details:
+        days = details["cycle_reminder_days_before"]
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 7:
+            raise ValueError("profile.cycle_reminder_days_before 必须是 1-7 的整数。")
+    return details
 
 
 def _validate_time(value: str, field: str) -> str:

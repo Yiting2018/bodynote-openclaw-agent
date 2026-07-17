@@ -100,12 +100,51 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(result["safety"]["level"], "urgent")
         self.assertEqual(result["insights"][0]["type"], "risk")
 
+    def test_activity_and_nutrition_scores_expose_detailed_basis(self) -> None:
+        OnboardingService(self.database).configure(
+            {
+                "profile": {
+                    "daily_calorie_target_kcal": 2000,
+                    "daily_protein_target_g": 120,
+                }
+            }
+        )
+        self.record(
+            "exercise",
+            "2026-07-16T18:00:00+08:00",
+            {
+                "activity": "抗阻训练",
+                "duration_min": 55,
+                "sets": 5,
+                "reps": 8,
+                "weight_kg": 50,
+                "rpe": 8,
+            },
+        )
+        for hour, payload in (
+            (8, {"meal_type": "breakfast", "foods": ["燕麦", "酸奶", "水果"], "calories_kcal": 520, "protein_g": 35}),
+            (12, {"meal_type": "lunch", "foods": ["米饭", "鸡胸", "青菜"], "calories_kcal": 720, "protein_g": 45}),
+            (19, {"meal_type": "dinner", "foods": ["土豆", "牛肉", "菌菇"], "calories_kcal": 700, "protein_g": 42}),
+        ):
+            self.record("meal", f"2026-07-16T{hour:02d}:00:00+08:00", payload)
+
+        result = self.analytics.analyze("daily", "2026-07-16")
+
+        movement_labels = {item["label"] for item in result["modules"]["movement"]["basis"]}
+        nutrition_labels = {item["label"] for item in result["modules"]["nutrition"]["basis"]}
+        self.assertTrue({"抗阻训练", "训练强度", "活动时长"}.issubset(movement_labels))
+        self.assertTrue({"食物多样性", "能量目标", "蛋白质目标"}.issubset(nutrition_labels))
+        self.assertEqual(result["modules"]["movement"]["metrics"]["strength_volume_kg"], 2000)
+
     def test_weekly_model_has_structure_and_trend(self) -> None:
         for day in range(10, 17):
             self.record(
                 "exercise",
                 f"2026-07-{day:02d}T18:00:00+08:00",
-                {"activity": "walking", "steps": 6000 + day * 100},
+                {
+                    "activity": "抗阻训练" if day == 16 else "walking",
+                    "steps": 6000 + day * 100,
+                },
             )
             self.record(
                 "sleep",
@@ -118,6 +157,8 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(result["model"], "weekly-v1")
         self.assertEqual(len(result["trend"]), 7)
         self.assertEqual(result["movement_structure"]["sessions"], 7)
+        self.assertEqual(result["movement_structure"]["strength"], 1)
+        self.assertEqual(result["movement_structure"]["cardio"], 6)
         self.assertEqual(result["data_completeness"]["days_with_data"], 7)
 
     def test_monthly_sparse_data_downgrades_to_summary(self) -> None:

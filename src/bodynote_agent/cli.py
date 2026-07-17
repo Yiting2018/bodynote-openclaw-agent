@@ -12,6 +12,7 @@ from bodynote_agent.gap_check import GapCheckService
 from bodynote_agent import __version__
 from bodynote_agent.maintenance import BackupService, PrivacyAuditService, ReleaseService
 from bodynote_agent.preferences import OnboardingService
+from bodynote_agent.reference_library import ReferenceLibraryService
 from bodynote_agent.runtime import initialize, status
 from bodynote_agent.reports import ReportService
 from bodynote_agent.schedule_plan import SchedulePlanService
@@ -154,6 +155,23 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_build.add_argument("--date", help="Daily model date, YYYY-MM-DD.")
     dashboard_build.add_argument("--json", action="store_true")
 
+    reference_parser = subparsers.add_parser(
+        "reference", help="Manage structured notes extracted from owner-approved guides."
+    )
+    reference_subparsers = reference_parser.add_subparsers(
+        dest="reference_command", required=True
+    )
+    reference_add = reference_subparsers.add_parser("add")
+    reference_add.add_argument("--input", type=Path, required=True)
+    reference_add.add_argument("--json", action="store_true")
+    reference_list = reference_subparsers.add_parser("list")
+    reference_list.add_argument("--enabled-only", action="store_true")
+    reference_list.add_argument("--json", action="store_true")
+    for command in ("enable", "disable"):
+        item = reference_subparsers.add_parser(command)
+        item.add_argument("guide_id")
+        item.add_argument("--json", action="store_true")
+
     maintenance_parser = subparsers.add_parser(
         "maintenance", help="Run schema migrations and maintenance checks."
     )
@@ -283,6 +301,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = {"ok": True, "dashboard": str(dashboard)}
             return _emit_result(result, json_output=args.json)
 
+        if args.command == "reference":
+            library = ReferenceLibraryService(paths.database)
+            if args.reference_command == "add":
+                result = library.add(_read_json_object(args.input))
+            elif args.reference_command == "list":
+                result = library.list(enabled_only=args.enabled_only)
+            else:
+                result = library.set_enabled(
+                    args.guide_id, args.reference_command == "enable"
+                )
+            return _emit_result(result, json_output=args.json)
+
         if args.command == "maintenance":
             initialize(paths.home)
             result = status(paths.home)
@@ -405,6 +435,13 @@ def _emit_result(result: dict[str, Any], *, json_output: bool) -> int:
         print(f"共 {result['count']} 份报告。")
         for report in result["reports"]:
             print(f"{report['report_type']}  {report['period_key']}  {report['status']}")
+    elif "guides" in result:
+        print(f"共 {result['count']} 份参考指南。")
+        for guide in result["guides"]:
+            state = "启用" if guide["enabled"] else "停用"
+            print(f"{guide['id']}  {guide['title']}  {state}")
+    elif "guide" in result:
+        print(f"{result['guide']['title']}  {'启用' if result['guide']['enabled'] else '停用'}")
     elif result.get("backup") and result.get("restored"):
         print(f"已恢复备份：{result['backup']}")
         print(f"恢复前安全备份：{result['safety_backup']}")

@@ -20,7 +20,7 @@ class RuntimeTest(unittest.TestCase):
             self.assertTrue(Path(result["reports"]).is_dir())
 
             state = status(home)
-            self.assertEqual(state["database"]["schema_version"], 4)
+            self.assertEqual(state["database"]["schema_version"], 5)
             self.assertEqual(state["database"]["profile_count"], 1)
             self.assertEqual(state["database"]["event_count"], 0)
 
@@ -102,7 +102,7 @@ class RuntimeTest(unittest.TestCase):
                 }
                 version = connection.execute("SELECT MAX(version) FROM schema_meta").fetchone()[0]
 
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 5)
             self.assertTrue(
                 {"idempotency_key", "revision", "updated_at", "deleted_at"}.issubset(columns)
             )

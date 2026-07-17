@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as stdlib_html
 import json
 import os
 import shutil
@@ -11,9 +12,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from bodynote_agent.analytics import HealthAnalysisService
+from bodynote_agent.dashboard import dashboard_snapshot, render_dashboard_html
 from bodynote_agent.database import connect, new_id
-from bodynote_agent.html_report import PALETTE, render_report_html
-from bodynote_agent.preferences import ALLOWED_REPORT_FORMATS, OnboardingService
+from bodynote_agent.html_report import PALETTE, event_summary, render_report_html
+from bodynote_agent.preferences import ALLOWED_REPORT_FORMATS, OnboardingService, local_date
+from bodynote_agent.trends import TrendAnalysisService
 
 
 MIME_TYPES = {
@@ -58,9 +61,28 @@ class ReportService:
         model = self.analytics.analyze(report_type, period_key, now=now)
         if not model.get("ok"):
             return model
+        reference_day = _dashboard_reference_day(
+            model, settings["profile"]["timezone"], now
+        )
+        model = dict(model)
+        trend_bundle = TrendAnalysisService(self.database_path).analyze(
+            reference_day,
+            timezone_name=settings["profile"]["timezone"],
+            profile=settings["profile"],
+        )
+        model["trend_analysis"] = trend_bundle["periods"][report_type]
+        model["cycle_support"] = trend_bundle["cycle"]
+        model["analysis_references"] = trend_bundle["references"]
         key = str(model["period_key"])
+        events = self.analytics.events.list_period(
+            start_date=model["period"]["start"],
+            end_date=model["period"]["end"],
+            timezone_name=model["timezone"],
+        )
         output_dir = self.reports_root / report_type / key
-        input_hash = _hash_json({"model": model, "formats": selected})
+        input_hash = _hash_json(
+            {"model": model, "events": events, "formats": selected, "renderer": 8}
+        )
         duplicate = self._existing_result(report_type, key, input_hash)
         if duplicate:
             duplicate["attachments"] = _delivery_attachments(
@@ -87,11 +109,11 @@ class ReportService:
 
             if "html" in selected:
                 html_path = output_dir / "report.html"
-                _write_text(html_path, render_report_html(model))
+                _write_text(html_path, render_report_html(model, events=events))
                 artifacts["html"] = _artifact(html_path, "html")
             if "png" in selected:
                 png_path = output_dir / "report.png"
-                _render_png(model, png_path)
+                _render_png(model, png_path, events=events)
                 artifacts["png"] = _artifact(png_path, "png")
             if "pdf" in selected:
                 pdf_path = output_dir / "report.pdf"
@@ -148,10 +170,33 @@ class ReportService:
                     "href": os.path.relpath(target, dashboard_dir),
                 }
             )
-        _write_text(
-            dashboard_path,
-            render_report_html(model, dashboard=True, archive=archive),
+        profile = self.onboarding.status()["profile"]
+        selected_day = _dashboard_reference_day(
+            model, profile["timezone"], None
         )
+        daily = (
+            model
+            if model.get("period_type") == "daily" and model.get("period_key") == selected_day
+            else self.analytics.analyze("daily", selected_day)
+        )
+        weekly = self.analytics.analyze("weekly", selected_day)
+        monthly = self.analytics.analyze("monthly", selected_day[:7])
+        events = self.analytics.events.list(limit=500)
+        trends = TrendAnalysisService(self.database_path).analyze(
+            selected_day,
+            timezone_name=profile["timezone"],
+            profile=profile,
+        )
+        snapshot = dashboard_snapshot(
+            daily=daily,
+            weekly=weekly,
+            monthly=monthly,
+            events=events,
+            archive=archive,
+            profile=profile,
+            trends=trends,
+        )
+        _write_text(dashboard_path, render_dashboard_html(snapshot))
         return dashboard_path
 
     def list_reports(self, *, limit: int = 50) -> dict[str, Any]:
@@ -271,107 +316,231 @@ def _normalize_formats(formats: list[str]) -> list[str]:
     return normalized
 
 
-def _render_png(model: dict[str, Any], path: Path) -> None:
+def _render_png(
+    model: dict[str, Any], path: Path, *, events: list[dict[str, Any]] | None = None
+) -> None:
     try:
         from PIL import Image, ImageDraw
     except ImportError as error:
         raise RuntimeError("生成 PNG 需要 Pillow，请先安装项目依赖。") from error
 
     width, height = 1080, 1920
-    image = Image.new("RGB", (width, height), "#F2F4F6")
+    image = Image.new("RGB", (width, height), "#08090D")
     draw = ImageDraw.Draw(image)
     accent = PALETTE.get(model["status"], PALETTE["unknown"])
-    ink = "#17202A"
-    muted = "#697386"
-    paper = "#FFFFFF"
-    line = "#DDE2E8"
+    ink = "#F6F7F9"
+    muted = "#9298A5"
+    paper = "#111318"
+    paper_2 = "#181B22"
+    line = "#2B3039"
     fonts = _load_pillow_fonts()
-    draw.rectangle((0, 0, width, 120), fill=ink)
-    draw.text((58, 40), "BodyNote", font=fonts["brand"], fill="white")
-    draw.text((width - 350, 45), _period_text(model), font=fonts["small"], fill="#CBD3DC")
-    draw.rounded_rectangle((38, 154, width - 38, 510), radius=8, fill=paper)
-    draw.ellipse((74, 194, 326, 446), outline="#E5E9ED", width=24)
+    events = events or []
+
+    for row in range(0, 610, 4):
+        ratio = row / 610
+        base = (10, 12, 16)
+        accent_rgb = tuple(int(accent[index : index + 2], 16) for index in (1, 3, 5))
+        color = tuple(int(base[i] * ratio + accent_rgb[i] * (1 - ratio) * 0.18) for i in range(3))
+        draw.rectangle((0, row, width, row + 4), fill=color)
+    draw.rectangle((48, 45, 94, 91), outline=accent, width=3)
+    draw.text((62, 52), "B", font=fonts["body"], fill=accent)
+    draw.text((112, 48), "BodyNote", font=fonts["brand"], fill=ink)
+    period_text = _period_text(model)
+    period_width = draw.textlength(period_text, font=fonts["small"])
+    draw.text((width - 48 - period_width, 55), period_text, font=fonts["small"], fill="#C4C8D0")
+    kicker = {"daily": "TODAY SIGNAL", "weekly": "WEEKLY RHYTHM", "monthly": "MONTHLY CHANGE"}[model["period_type"]]
+    draw.text((48, 142), kicker, font=fonts["small"], fill=accent)
+    _draw_wrapped(draw, model["summary"]["headline"], (48, 188), 650, fonts["headline"], ink, 58, max_lines=3)
+    first_insight = model["insights"][0]["explanation"] if model["insights"] else "数据正在形成你的个人健康脉络。"
+    _draw_wrapped(draw, first_insight, (48, 380), 630, fonts["small"], "#B1B6C0", 30, max_lines=3)
+
     score = model["health_score"]
     progress = (score if score is not None else round(model["confidence"] * 100)) * 3.6
-    draw.arc((74, 194, 326, 446), start=-90, end=-90 + progress, fill=accent, width=24)
+    draw.ellipse((760, 158, 1012, 410), outline=line, width=22)
+    draw.arc((760, 158, 1012, 410), start=-90, end=-90 + progress, fill=accent, width=22)
     score_text = str(score) if score is not None else "--"
     score_box = draw.textbbox((0, 0), score_text, font=fonts["score"])
-    draw.text((200 - (score_box[2] - score_box[0]) / 2, 270), score_text, font=fonts["score"], fill=accent)
-    draw.text((156, 372), "健康状态", font=fonts["small"], fill=muted)
-    _draw_wrapped(draw, model["summary"]["headline"], (380, 205), 585, fonts["headline"], ink, 58, max_lines=3)
-    draw.text((380, 390), f"数据置信度 {round(model['confidence'] * 100)}%", font=fonts["body"], fill=muted)
-    y = 548
-    draw.text((48, y), "四个健康维度", font=fonts["section"], fill=ink)
-    y += 58
+    draw.text((886 - (score_box[2] - score_box[0]) / 2, 232), score_text, font=fonts["score"], fill=accent)
+    draw.text((839, 335), "健康状态", font=fonts["small"], fill=muted)
+    draw.text((760, 448), f"数据置信度  {round(model['confidence'] * 100)}%", font=fonts["small"], fill=muted)
+    draw.rounded_rectangle((760, 486, 1012, 496), radius=5, fill=line)
+    draw.rounded_rectangle((760, 486, 760 + int(252 * model["confidence"]), 496), radius=5, fill="#42D7E8")
+
+    y = 642
+    overview_title = {
+        "daily": "今日关键指标",
+        "weekly": "本周关键变化",
+        "monthly": "本月关键变化",
+    }[model["period_type"]]
+    draw.text((48, y), overview_title, font=fonts["section"], fill=ink)
+    y += 52
+    metrics = _png_metrics(model, events)
     card_width = 237
-    for index, module in enumerate(model["modules"].values()):
+    for index, (label, value, note) in enumerate(metrics[:4]):
         x = 38 + index * (card_width + 18)
-        draw.rounded_rectangle((x, y, x + card_width, y + 215), radius=8, fill=paper, outline=line)
-        draw.text((x + 20, y + 20), module["label"], font=fonts["small"], fill=muted)
-        value = str(module["score"]) if module["score"] is not None else "--"
-        draw.text((x + 20, y + 62), value, font=fonts["module"], fill=ink)
-        _draw_wrapped(draw, module["summary"], (x + 20, y + 137), card_width - 40, fonts["small"], muted, 26, max_lines=2)
-    y += 260
-    y = _draw_model_specific_png(draw, model, y, fonts, paper, ink, muted, accent, line)
-    draw.text((48, y), "值得注意", font=fonts["section"], fill=ink)
-    y += 58
-    for insight in model["insights"][:3]:
-        color = PALETTE.get(insight["severity"], PALETTE["blue"])
-        draw.rounded_rectangle((38, y, width - 38, y + 145), radius=8, fill=paper, outline=line)
-        draw.rectangle((38, y, 48, y + 145), fill=color)
-        draw.text((70, y + 20), insight["title"], font=fonts["card"], fill=ink)
-        _draw_wrapped(draw, insight["explanation"], (70, y + 65), width - 150, fonts["small"], muted, 27, max_lines=2)
-        y += 162
-        if y > 1640:
-            break
-    if y < 1700:
-        draw.text((48, y + 4), "接下来", font=fonts["section"], fill=ink)
+        draw.rounded_rectangle((x, y, x + card_width, y + 172), radius=8, fill=paper, outline=line)
+        draw.text((x + 18, y + 18), label, font=fonts["small"], fill=muted)
+        _draw_wrapped(draw, value, (x + 18, y + 60), card_width - 36, fonts["module"], [accent, "#42D7E8", "#A982FF", "#FFC857"][index], 45, max_lines=1)
+        _draw_wrapped(draw, note, (x + 18, y + 120), card_width - 36, fonts["tiny"], "#747B87", 22, max_lines=2)
+
+    y = _draw_png_cycle(draw, model, 890, fonts, ink, muted, paper_2, line)
+    if model["period_type"] == "daily":
+        draw.text((48, y), "今天发生了什么", font=fonts["section"], fill=ink)
+        y += 52
+        for event in events[:3]:
+            draw.text((48, y + 2), event["occurred_at"][11:16], font=fonts["tiny"], fill=accent)
+            draw.ellipse((142, y + 7, 154, y + 19), fill=accent)
+            draw.line((148, y + 20, 148, y + 72), fill=line, width=2)
+            _draw_wrapped(draw, f"{event_summary(event)}", (176, y), 820, fonts["body"], ink, 31, max_lines=1)
+            draw.text((176, y + 37), f"来源：{event.get('source') or '本地记录'}", font=fonts["tiny"], fill=muted)
+            y += 76
+    elif model["period_type"] == "weekly":
+        draw.text((48, y), "跨维度关联线索", font=fonts["section"], fill=ink)
         y += 54
-        for number, action in enumerate(model["actions"][:3], 1):
-            draw.ellipse((48, y + 3, 82, y + 37), fill=accent)
-            draw.text((60, y + 7), str(number), font=fonts["tiny"], fill="white")
-            _draw_wrapped(draw, action["title"], (100, y), 860, fonts["body"], ink, 34, max_lines=1)
-            y += 54
-    if y < 1550 and model["actions"]:
-        action = model["actions"][0]
-        top = y + 24
-        bottom = min(1805, top + 245)
-        draw.rounded_rectangle((38, top, width - 38, bottom), radius=8, fill=ink)
-        draw.text((72, top + 28), "下一周期的核心小目标", font=fonts["small"], fill="#CBD3DC")
-        _draw_wrapped(draw, action["title"], (72, top + 78), width - 150, fonts["headline"], "white", 54, max_lines=2)
-        _draw_wrapped(draw, action["rationale"], (72, top + 175), width - 150, fonts["small"], "#CBD3DC", 28, max_lines=2)
-    draw.text((48, 1865), "健康状态与数据完整度分开计算 · 不替代专业医疗建议", font=fonts["small"], fill=muted)
+        relationships = model.get("trend_analysis", {}).get("relationships", [])
+        if not relationships:
+            draw.rounded_rectangle((38, y, width - 38, y + 150), radius=8, fill=paper_2, outline=line)
+            draw.text((70, y + 30), "关联证据积累中", font=fonts["card"], fill=ink)
+            draw.text((70, y + 82), "需要前后两期的配对指标，才能形成跨维度线索。", font=fonts["small"], fill=muted)
+            y += 170
+        else:
+            for item in relationships[:2]:
+                draw.rounded_rectangle((38, y, width - 38, y + 126), radius=8, fill=paper_2, outline=line)
+                draw.text((66, y + 20), item["title"], font=fonts["card"], fill="#42D7E8")
+                _draw_wrapped(draw, item["summary"], (66, y + 60), width - 132, fonts["tiny"], muted, 24, max_lines=2)
+                y += 142
+    else:
+        draw.text((48, y), "身体与行为变化", font=fonts["section"], fill=ink)
+        y += 56
+        changes = [(key, item) for key, item in model["body_change"].items() if isinstance(item, dict) and "change" in item]
+        labels = {"weight_kg": ("体重", "kg"), "body_fat_pct": ("体脂", "%"), "body_fat_percent": ("体脂", "%"), "skeletal_muscle_kg": ("骨骼肌", "kg"), "waist_cm": ("腰围", "cm")}
+        if not changes:
+            draw.rounded_rectangle((38, y, width - 38, y + 170), radius=8, fill=paper_2, outline=line)
+            draw.text((70, y + 34), "趋势证据积累中", font=fonts["card"], fill=ink)
+            draw.text((70, y + 88), "至少两次可比较记录后，这里会显示身体成分变化。", font=fonts["small"], fill=muted)
+            y += 190
+        else:
+            for index, (key, item) in enumerate(changes[:3]):
+                x = 38 + index * 340
+                label, unit = labels.get(key, (key, ""))
+                draw.rounded_rectangle((x, y, x + 320, y + 170), radius=8, fill=paper_2, outline=line)
+                draw.text((x + 22, y + 22), label, font=fonts["small"], fill=muted)
+                draw.text((x + 22, y + 66), f"{item['change']:+.2f} {unit}", font=fonts["module"], fill=accent)
+                draw.text((x + 22, y + 127), f"{item['first']} → {item['latest']}", font=fonts["tiny"], fill=muted)
+            y += 190
+
+        relationships = model.get("trend_analysis", {}).get("relationships", [])
+        if relationships:
+            draw.text((48, y), "跨维度关联线索", font=fonts["small"], fill=ink)
+            _draw_wrapped(draw, relationships[0]["summary"], (300, y), 730, fonts["tiny"], muted, 24, max_lines=2)
+            y += 64
+
+    y = max(y + 12, 1280)
+    draw.text((48, y), "维度评分", font=fonts["section"], fill=ink)
+    y += 55
+    module_colors = [accent, "#42D7E8", "#FF7082", "#A982FF"]
+    for index, module in enumerate(model["modules"].values()):
+        draw.text((48, y), module["label"], font=fonts["small"], fill=muted)
+        draw.rounded_rectangle((190, y + 6, 900, y + 20), radius=7, fill=line)
+        fill_width = int(710 * (module["score"] or 0) / 100)
+        if fill_width:
+            draw.rounded_rectangle((190, y + 6, 190 + fill_width, y + 20), radius=7, fill=module_colors[index])
+        value = str(module["score"] if module["score"] is not None else "--")
+        draw.text((938, y - 4), value, font=fonts["body"], fill=ink)
+        basis = " · ".join(str(item["label"]) for item in module.get("basis", [])[:3]) or "评分证据积累中"
+        draw.text((190, y + 27), basis, font=fonts["tiny"], fill="#747B87")
+        y += 57
+
+    y += 12
+    draw.text((48, y), "下一步行动", font=fonts["section"], fill=ink)
+    y += 52
+    action = model["actions"][0] if model["actions"] else {"title": "继续稳定记录", "rationale": "让趋势逐步变得可靠。", "timing": "接下来"}
+    draw.rounded_rectangle((38, y, width - 38, min(y + 150, 1835)), radius=8, fill=paper_2, outline="#66552D")
+    draw.text((70, y + 25), action["timing"], font=fonts["tiny"], fill="#FFC857")
+    _draw_wrapped(draw, action["title"], (70, y + 56), width - 140, fonts["card"], ink, 35, max_lines=1)
+    _draw_wrapped(draw, action["rationale"], (70, y + 98), width - 140, fonts["tiny"], muted, 23, max_lines=2)
+    draw.text((48, 1872), "本地生成 · 健康状态与数据完整度分开计算 · 不替代专业医疗建议", font=fonts["small"], fill="#656C77")
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
     path.chmod(0o600)
 
 
-def _draw_model_specific_png(draw: Any, model: dict[str, Any], y: int, fonts: dict[str, Any], paper: str, ink: str, muted: str, accent: str, line: str) -> int:
-    if model["period_type"] == "daily":
-        completeness = model["data_completeness"]
-        draw.text((48, y), "今日记录", font=fonts["section"], fill=ink)
-        draw.text((270, y), f"完成 {len(completeness['completed'])}/{len(completeness['required'])}", font=fonts["body"], fill=accent)
-        draw.text((540, y), f"缺口 {len(completeness['missing'])}", font=fonts["body"], fill=muted)
-        return y + 80
+def _draw_png_cycle(
+    draw: Any,
+    model: dict[str, Any],
+    y: int,
+    fonts: dict[str, Any],
+    ink: str,
+    muted: str,
+    paper: str,
+    line: str,
+) -> int:
+    cycle = model.get("cycle_support") or {}
+    support = cycle.get("support") or {}
+    if not cycle.get("enabled") or support.get("visible") is False:
+        return y
+    draw.rounded_rectangle((38, y, 1042, y + 122), radius=8, fill=paper, outline=line)
+    draw.text((66, y + 18), "周期支持", font=fonts["small"], fill="#A982FF")
+    draw.text((190, y + 18), str(support.get("title") or "规律积累中"), font=fonts["body"], fill=ink)
+    _draw_wrapped(draw, str(support.get("action") or support.get("note") or cycle.get("message") or ""), (66, y + 60), 930, fonts["tiny"], muted, 23, max_lines=2)
+    return y + 150
+
+
+def _png_metrics(
+    model: dict[str, Any], events: list[dict[str, Any]]
+) -> list[tuple[str, str, str]]:
+    trend = model.get("trend_analysis", {})
+    trend_metrics = trend.get("metrics", {})
+    keys = {
+        "daily": ("steps", "exercise_kcal", "protein_g", "weight_kg"),
+        "weekly": ("steps", "strength_sessions", "protein_g", "sleep_hours"),
+        "monthly": ("weight_kg", "body_fat_pct", "skeletal_muscle_kg", "protein_g"),
+    }[model["period_type"]]
+    rich = []
+    for key in keys:
+        item = trend_metrics.get(key)
+        if not item:
+            continue
+        current = item.get("current")
+        delta = item.get("delta")
+        value = "--" if current is None else f"{current:g} {item['unit']}"
+        note = "暂无前期对照" if delta is None else f"较前期 {delta:+g} {item['unit']}"
+        rich.append((item["label"], value, note))
+    if len(rich) == 4:
+        return rich
     if model["period_type"] == "weekly":
-        draw.text((48, y), "七日趋势", font=fonts["section"], fill=ink)
-        base = y + 180
-        for index, point in enumerate(model["trend"]):
-            x = 58 + index * 142
-            score = point["score"] or 0
-            bar_height = max(8, int(score * 1.1))
-            draw.rounded_rectangle((x, base - bar_height, x + 72, base), radius=4, fill=accent)
-            draw.text((x + 9, base + 12), point["date"][5:], font=fonts["tiny"], fill=muted)
-        return base + 58
-    draw.text((48, y), "本月积累", font=fonts["section"], fill=ink)
-    consistency = model["consistency"]
-    values = [("记录日", consistency["active_days"]), ("活动", consistency["exercise_days"]), ("饮食", consistency["meal_days"]), ("睡眠", consistency["sleep_days"])]
-    for index, (label, value) in enumerate(values):
-        x = 48 + index * 245
-        draw.rounded_rectangle((x, y + 52, x + 220, y + 142), radius=8, fill=paper, outline=line)
-        draw.text((x + 18, y + 68), label, font=fonts["small"], fill=muted)
-        draw.text((x + 126, y + 61), str(value), font=fonts["module"], fill=accent)
-    return y + 185
+        movement = model["movement_structure"]
+        recovery = model["recovery_pattern"]
+        return [
+            ("记录日", f"{model['data_completeness']['days_with_data']} / 7", "本周数据覆盖"),
+            ("活动", f"{movement['sessions']} 次", f"力量 {movement['strength']} · 有氧 {movement['cardio']}"),
+            ("平均睡眠", f"{recovery['average_sleep_hours'] or '--'} h", f"{recovery['sleep_records']} 条记录"),
+            ("健康分", str(model["health_score"] or "--"), "综合状态参考"),
+        ]
+    if model["period_type"] == "monthly":
+        consistency = model["consistency"]
+        capacity = model["training_capacity"]
+        return [
+            ("记录日", f"{consistency['active_days']} 天", "本月有证据的日期"),
+            ("活动", f"{capacity['sessions']} 次", f"累计 {capacity['total_duration_min']} 分钟"),
+            ("饮食", f"{consistency['meal_days']} 天", "饮食模式覆盖"),
+            ("睡眠", f"{consistency['sleep_days']} 天", "恢复趋势覆盖"),
+        ]
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        grouped.setdefault(event["event_type"], []).append(event)
+    exercises = grouped.get("exercise", [])
+    meals = grouped.get("meal", [])
+    sleep = (grouped.get("sleep") or [None])[-1]
+    body = (grouped.get("body") or [None])[-1]
+    steps = sum(int(event["payload"].get("steps") or 0) for event in exercises)
+    minutes = sum(int(event["payload"].get("duration_min") or 0) for event in exercises)
+    return [
+        ("活动", f"{steps:,} 步" if steps else f"{minutes} 分" if minutes else "未记录", f"{len(exercises)} 条运动记录"),
+        ("饮食", f"{len(meals)} 餐", "能量与营养结构"),
+        ("睡眠", f"{sleep['payload'].get('duration_hours')} h" if sleep else "未记录", str(sleep["payload"].get("quality") or "恢复证据") if sleep else "恢复证据"),
+        ("体重", f"{body['payload'].get('weight_kg')} kg" if body and body["payload"].get("weight_kg") is not None else "未记录", "身体趋势基线"),
+    ]
 
 
 def _load_pillow_fonts() -> dict[str, Any]:
@@ -432,7 +601,7 @@ def _render_pdf(model: dict[str, Any], path: Path) -> None:
         from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-        from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
     except ImportError as error:
         raise RuntimeError("生成 PDF 需要 reportlab，请先安装项目依赖。") from error
 
@@ -448,21 +617,49 @@ def _render_pdf(model: dict[str, Any], path: Path) -> None:
     score = model["health_score"] if model["health_score"] is not None else "暂无"
     summary_table = Table([["健康状态", "数据置信度", "记录范围"], [str(score), f"{round(model['confidence'] * 100)}%", _period_text(model)]], colWidths=[50 * mm, 50 * mm, 60 * mm])
     summary_table.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "STSong-Light"), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17202A")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("ALIGN", (0, 0), (-1, -1), "CENTER"), ("FONTSIZE", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 8), ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDE2E8"))]))
-    story.extend([summary_table, Spacer(1, 8 * mm), Paragraph("四个健康维度", heading)])
+    story.extend([summary_table, Spacer(1, 8 * mm)])
+    cycle = model.get("cycle_support") or {}
+    support = cycle.get("support") or {}
+    if cycle.get("enabled") and support.get("visible") is not False:
+        story.extend(
+            [
+                Paragraph("周期支持", heading),
+                Paragraph(f"<b>{stdlib_html.escape(_pdf_text(support.get('title') or '周期规律积累中'))}</b>", body),
+                Paragraph(stdlib_html.escape(_pdf_text(support.get("note") or cycle.get("message") or "")), body),
+                Paragraph(stdlib_html.escape(_pdf_text(support.get("action") or "继续记录周期和主观感受。")), body),
+                Paragraph(stdlib_html.escape(str(cycle.get("disclaimer") or "")), small),
+            ]
+        )
+    story.append(Paragraph("维度评分", heading))
     module_rows = [["维度", "状态分", "证据置信度", "摘要"]]
     for module in model["modules"].values():
-        module_rows.append([module["label"], str(module["score"] if module["score"] is not None else "暂无"), f"{round(module['confidence'] * 100)}%", Paragraph(module["summary"], body)])
+        basis = "；".join(
+            f"{item['label']} {item['score']}：{item['evidence']}"
+            for item in module.get("basis", [])
+        ) or "评分证据积累中"
+        module_rows.append([module["label"], str(module["score"] if module["score"] is not None else "暂无"), f"{round(module['confidence'] * 100)}%", Paragraph(f"{stdlib_html.escape(_pdf_text(module['summary']))}<br/><font size='8'>{stdlib_html.escape(_pdf_text(basis))}</font>", body)])
     modules_table = Table(module_rows, colWidths=[28 * mm, 24 * mm, 29 * mm, 79 * mm], repeatRows=1)
     modules_table.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "STSong-Light"), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEF1F4")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#17202A")), ("VALIGN", (0, 0), (-1, -1), "TOP"), ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#DDE2E8")), ("FONTSIZE", (0, 0), (-1, -1), 9.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 7), ("TOPPADDING", (0, 0), (-1, -1), 7)]))
     story.extend([modules_table, Spacer(1, 5 * mm), Paragraph("洞察", heading)])
     for insight in model["insights"]:
         story.extend([Paragraph(f"<b>{insight['title']}</b>", body), Paragraph(insight["explanation"], body), Paragraph(f"下一步：{insight['next_action']}", small), Spacer(1, 3 * mm)])
+    relationships = model.get("trend_analysis", {}).get("relationships", [])
+    if relationships:
+        story.append(Paragraph("跨维度关联线索", heading))
+        for item in relationships[:4]:
+            story.extend(
+                [
+                    Paragraph(f"<b>{stdlib_html.escape(str(item['title']))}</b>", body),
+                    Paragraph(stdlib_html.escape(f"{item['summary']} {item['caveat']}"), small),
+                    Spacer(1, 2 * mm),
+                ]
+            )
     story.extend([Paragraph("行动", heading)])
     for index, action in enumerate(model["actions"], 1):
         story.append(Paragraph(f"{index}. <b>{action['title']}</b>（{action['timing']}）<br/>{action['rationale']}", body))
         story.append(Spacer(1, 3 * mm))
     if model["period_type"] != "daily":
-        story.extend([PageBreak(), Paragraph("周期结构", heading)])
+        story.append(Paragraph("周期结构", heading))
         detail_rows = [
             [Paragraph(f"<b>{label}</b>", body), Paragraph(value, body)]
             for label, value in _pdf_period_details(model)
@@ -482,13 +679,11 @@ def _render_pdf(model: dict[str, Any], path: Path) -> None:
             )
         )
         story.append(detail_table)
-    story.extend([Spacer(1, 7 * mm), Paragraph("健康状态与数据完整度分开计算。BodyNote 不用于诊断、处方或替代专业医疗建议。", small)])
-
     def footer(canvas: Any, doc: Any) -> None:
         canvas.saveState()
         canvas.setFont("STSong-Light", 8)
         canvas.setFillColor(colors.HexColor("#697386"))
-        canvas.drawString(18 * mm, 10 * mm, "BodyNote 本地健康报告")
+        canvas.drawString(18 * mm, 10 * mm, "BodyNote 不用于诊断、处方或替代专业医疗建议。")
         canvas.drawRightString(A4[0] - 18 * mm, 10 * mm, f"第 {doc.page} 页")
         canvas.restoreState()
 
@@ -496,23 +691,36 @@ def _render_pdf(model: dict[str, Any], path: Path) -> None:
     path.chmod(0o600)
 
 
+def _pdf_text(value: Any) -> str:
+    return str(value).replace(" · ", "，").replace("·", "，")
+
+
 def _pdf_period_details(model: dict[str, Any]) -> list[tuple[str, str]]:
     if model["period_type"] == "weekly":
         structure = model["movement_structure"]
         nutrition = model["nutrition_pattern"]
         recovery = model["recovery_pattern"]
+        selected_metrics = model.get("trend_analysis", {}).get("metrics", {})
         trend = "；".join(
-            f"{point['date'][5:]} {point['score'] if point['score'] is not None else '--'}"
-            for point in model["trend"]
-        )
+            f"{selected_metrics[key]['label']} {selected_metrics[key]['current']:g} "
+            f"{selected_metrics[key]['unit']}（较前期 {selected_metrics[key]['delta']:+g} "
+            f"{selected_metrics[key]['unit']}）"
+            for key in ("steps", "strength_sessions", "protein_g", "sleep_hours")
+            if key in selected_metrics
+            and selected_metrics[key].get("current") is not None
+            and selected_metrics[key].get("delta") is not None
+        ) or "当前没有足够的前期对照。"
         next_action = model["actions"][0]["title"] if model["actions"] else "继续稳定记录"
-        return [("七日状态", trend), ("运动结构", f"共 {structure['sessions']} 次：有氧 {structure['cardio']}，力量 {structure['strength']}，其他 {structure['other']}。"), ("饮食模式", f"共 {nutrition['meals']} 条记录；工作日均值 {nutrition['weekday_daily_average']}，周末均值 {nutrition['weekend_daily_average']}。"), ("恢复模式", f"平均睡眠 {recovery['average_sleep_hours']} 小时，共 {recovery['sleep_records']} 条睡眠记录。"), ("下周重点", next_action)]
+        return [("关键变化", trend), ("运动结构", f"共 {structure['sessions']} 次：有氧 {structure['cardio']}，力量 {structure['strength']}，其他 {structure['other']}。"), ("饮食模式", f"共 {nutrition['meals']} 条记录；工作日均值 {nutrition['weekday_daily_average']}，周末均值 {nutrition['weekend_daily_average']}。"), ("恢复模式", f"平均睡眠 {recovery['average_sleep_hours']} 小时，共 {recovery['sleep_records']} 条睡眠记录。"), ("下周重点", next_action)]
     body = model["body_change"]
     consistency = model["consistency"]
     body_labels = {
         "weight_kg": ("体重", "kg"),
         "body_fat_pct": ("体脂率", "%"),
+        "body_fat_percent": ("体脂率", "%"),
+        "skeletal_muscle_kg": ("骨骼肌", "kg"),
         "muscle_mass_kg": ("肌肉量", "kg"),
+        "waist_cm": ("腰围", "cm"),
     }
     body_text = "；".join(
         f"{body_labels.get(key, (key, ''))[0]} "
@@ -562,6 +770,15 @@ def _stage_attachments(
 
 def _artifact(path: Path, file_format: str) -> dict[str, Any]:
     return {"path": str(path.resolve()), "mime_type": MIME_TYPES[file_format], "size_bytes": path.stat().st_size, "sha256": _sha256(path)}
+
+
+def _dashboard_reference_day(
+    model: dict[str, Any], timezone_name: str, now: datetime | None
+) -> str:
+    end = str(model["period"]["end"])
+    today = local_date(timezone_name, now)
+    start = str(model["period"]["start"])
+    return today if start <= today <= end else end
 
 
 def _summary_text(model: dict[str, Any]) -> str:

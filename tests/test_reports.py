@@ -59,9 +59,20 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(dashboard.exists())
         content = html_path.read_text(encoding="utf-8")
         self.assertIn("BodyNote", content)
-        self.assertIn("四个健康维度", content)
-        self.assertIn("@media (max-width: 760px)", content)
+        self.assertIn("维度评分", content)
+        self.assertIn("width:min(100%,560px)", content)
+        self.assertIn("今天发生了什么", content)
         self.assertNotIn("bodynote.sqlite3", content)
+        dashboard_content = dashboard.read_text(encoding="utf-8")
+        self.assertIn("记录时间轴", dashboard_content)
+        self.assertIn("后台原始数据", dashboard_content)
+        self.assertIn("活动训练", dashboard_content)
+        self.assertIn("身体状态", dashboard_content)
+        self.assertNotIn("生成报告</span>", dashboard_content)
+        self.assertIn("行为评分与身体变化", dashboard_content)
+        self.assertIn('data-period="custom"', dashboard_content)
+        self.assertIn("每日评分与身体变化", dashboard_content)
+        self.assertIn("raw_text", dashboard_content)
 
     def test_weekly_and_monthly_use_distinct_sections(self) -> None:
         weekly = self.service.generate(
@@ -77,10 +88,10 @@ class ReportTest(unittest.TestCase):
         monthly_html = Path(monthly["artifacts"]["html"]["path"]).read_text(
             encoding="utf-8"
         )
-        self.assertIn("七日趋势", weekly_html)
+        self.assertIn("本周真实指标变化", weekly_html)
         self.assertIn("本周结构", weekly_html)
         self.assertNotIn("身体变化", weekly_html)
-        self.assertIn("身体变化", monthly_html)
+        self.assertIn("本月关键变化", monthly_html)
         self.assertIn("行为稳定性", monthly_html)
         self.assertNotIn("七日趋势", monthly_html)
         monthly_model = self.service.analytics.analyze("monthly", "2026-07")

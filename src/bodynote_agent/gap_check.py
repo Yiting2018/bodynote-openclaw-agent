@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from bodynote_agent.events import EventRepository
+from bodynote_agent.cycle import CycleForecastService
 from bodynote_agent.preferences import (
     DAILY_FIELD_EVENT_TYPES,
     DAILY_FIELD_EXAMPLES,
@@ -18,6 +19,7 @@ class GapCheckService:
     def __init__(self, database_path: Path) -> None:
         self.events = EventRepository(database_path)
         self.onboarding = OnboardingService(database_path)
+        self.cycle = CycleForecastService(database_path)
 
     def check(self, date: str | None = None) -> dict[str, Any]:
         settings = self.onboarding.status()
@@ -59,6 +61,14 @@ class GapCheckService:
             }
             for field in missing[:3]
         ]
+        cycle = self.cycle.forecast(
+            target_date,
+            timezone_name=settings["profile"]["timezone"],
+            profile_details=settings["profile"]["details"],
+        )
+        prompt = _build_prompt(prompts)
+        if cycle.get("reminder_due"):
+            prompt += f" {cycle['message']}"
         return {
             "ok": True,
             "date": target_date,
@@ -71,10 +81,11 @@ class GapCheckService:
             "not_applicable": not_applicable,
             "not_required": [*not_planned, *not_applicable],
             "prompts": prompts,
-            "prompt": _build_prompt(prompts),
+            "prompt": prompt,
             "coverage": round(coverage, 3),
             "confidence_hint": _confidence_hint(coverage),
             "report_can_continue": True,
+            "cycle_forecast": cycle,
         }
 
 

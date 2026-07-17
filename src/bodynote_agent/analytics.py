@@ -79,7 +79,12 @@ class HealthAnalysisService:
             end_date=day,
             timezone_name=timezone_name,
         )
-        modules = _daily_modules(events, history)
+        modules = _daily_modules(
+            events,
+            history,
+            goal=settings["profile"]["primary_goal"],
+            profile_details=settings["profile"].get("details") or {},
+        )
         required = settings["schedule"]["required_daily_fields"]
         completed = _completed_fields(events, required)
         missing = [field for field in required if field not in completed]
@@ -133,7 +138,12 @@ class HealthAnalysisService:
         for offset in range(7):
             day = (start + timedelta(days=offset)).isoformat()
             day_events = by_day.get(day, [])
-            day_modules = _daily_modules(day_events, events)
+            day_modules = _daily_modules(
+                day_events,
+                events,
+                goal=settings["profile"]["primary_goal"],
+                profile_details=settings["profile"].get("details") or {},
+            )
             trend.append(
                 {
                     "date": day,
@@ -141,7 +151,13 @@ class HealthAnalysisService:
                     "event_count": len(day_events),
                 }
             )
-        modules = _period_modules(events, days=7, timezone_name=timezone_name)
+        modules = _period_modules(
+            events,
+            days=7,
+            timezone_name=timezone_name,
+            goal=settings["profile"]["primary_goal"],
+            profile_details=settings["profile"].get("details") or {},
+        )
         days_with_data = sum(1 for point in trend if point["event_count"])
         confidence = round(min(1.0, days_with_data / 7 * 0.8 + _event_reliability(events) * 0.2), 3)
         score = _weighted_score(modules)
@@ -200,7 +216,13 @@ class HealthAnalysisService:
             timezone_name=timezone_name,
         )
         by_day = _events_by_local_day(events, timezone_name)
-        modules = _period_modules(events, days=end.day, timezone_name=timezone_name)
+        modules = _period_modules(
+            events,
+            days=end.day,
+            timezone_name=timezone_name,
+            goal=settings["profile"]["primary_goal"],
+            profile_details=settings["profile"].get("details") or {},
+        )
         days_with_data = len(by_day)
         confidence = round(
             min(1.0, days_with_data / max(14, end.day) * 0.8 + _event_reliability(events) * 0.2),
@@ -289,10 +311,17 @@ class HealthAnalysisService:
                 )
 
 
-def _daily_modules(events: list[dict[str, Any]], history: list[dict[str, Any]]) -> dict[str, Any]:
+def _daily_modules(
+    events: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    *,
+    goal: str = "",
+    profile_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    details = profile_details or {}
     modules = {
-        "movement": _movement_module(events),
-        "nutrition": _nutrition_module(events),
+        "movement": _movement_module(events, goal=goal),
+        "nutrition": _nutrition_module(events, profile_details=details),
         "body": _body_module(events, history),
         "recovery": _recovery_module(events),
     }
@@ -301,34 +330,103 @@ def _daily_modules(events: list[dict[str, Any]], history: list[dict[str, Any]]) 
     return modules
 
 
-def _movement_module(events: list[dict[str, Any]]) -> dict[str, Any]:
+def _movement_module(events: list[dict[str, Any]], *, goal: str = "") -> dict[str, Any]:
     exercise = _of_type(events, "exercise")
     if not exercise:
         return _module(None, "暂无活动记录", 0.0, {})
     steps = sum(int(event["payload"].get("steps", 0)) for event in exercise)
     duration = sum(float(event["payload"].get("duration_min", 0)) for event in exercise)
-    score = 72
-    if steps >= 8000 or duration >= 30:
-        score = 92
-    elif steps >= 4000 or duration >= 15:
-        score = 82
-    elif steps and steps < 2000 and not duration:
-        score = 62
+    calories = sum(float(event["payload"].get("calories_kcal", 0)) for event in exercise)
+    strength = [event for event in exercise if _is_strength_event(event)]
+    volume = sum(_event_strength_volume(event) or 0 for event in strength)
+    intensity_values = [
+        value
+        for event in exercise
+        for value in [_exercise_intensity(event["payload"])]
+        if value is not None
+    ]
+    components = [
+        _basis_component("日常活动", _threshold_score(max(steps / 8000, duration / 30)), f"{steps} 步 · {duration:g} 分钟"),
+    ]
+    if duration:
+        components.append(_basis_component("活动时长", _threshold_score(duration / 30), f"累计 {duration:g} 分钟"))
+    if strength:
+        components.append(_basis_component("抗阻训练", 88 if volume else 76, f"{len(strength)} 次 · 容量 {volume:g} kg" if volume else f"{len(strength)} 次 · 容量待补充"))
+    if intensity_values:
+        average_intensity = round(mean(intensity_values), 1)
+        components.append(_basis_component("训练强度", 88 if 5 <= average_intensity <= 8.5 else 72, f"可用强度记录均值 {average_intensity}/10"))
+    weights = [1.25 if item["label"] == "抗阻训练" and any(token in goal for token in ("增肌", "力量", "抗阻")) else 1.0 for item in components]
+    score = round(sum(item["score"] * weight for item, weight in zip(components, weights)) / sum(weights))
     summary = f"{steps} 步" if steps else f"{round(duration)} 分钟活动"
-    return _module(score, summary, _event_reliability(exercise), {"steps": steps, "duration_min": round(duration, 1), "sessions": len(exercise)})
+    return _module(
+        score,
+        summary,
+        _event_reliability(exercise),
+        {
+            "steps": steps,
+            "duration_min": round(duration, 1),
+            "calories_kcal": round(calories, 1),
+            "sessions": len(exercise),
+            "strength_sessions": len(strength),
+            "strength_volume_kg": round(volume, 1),
+            "intensity_records": len(intensity_values),
+        },
+        components,
+    )
 
 
-def _nutrition_module(events: list[dict[str, Any]]) -> dict[str, Any]:
+def _nutrition_module(
+    events: list[dict[str, Any]], *, profile_details: dict[str, Any] | None = None
+) -> dict[str, Any]:
     meals = _of_type(events, "meal")
     if not meals:
         return _module(None, "暂无饮食记录", 0.0, {})
+    details = profile_details or {}
     meal_types = {event["payload"].get("meal_type") for event in meals} - {None, "unspecified"}
-    score = 68 if len(meals) == 1 else 82 if len(meals) == 2 else 90
-    if len(meal_types) >= 3:
-        score = max(score, 92)
+    foods = {
+        str(food).strip()
+        for event in meals
+        for food in event["payload"].get("foods", [])
+        if str(food).strip()
+    }
+    totals = {
+        field: round(sum(float(event["payload"].get(field, 0)) for event in meals), 1)
+        for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g")
+    }
     protein_records = sum(1 for event in meals if "protein_g" in event["payload"])
+    nutrient_records = sum(
+        1
+        for event in meals
+        if any(field in event["payload"] for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g"))
+    )
+    components = [
+        _basis_component("餐次覆盖", min(94, 60 + len(meals) * 11), f"记录 {len(meals)} 餐 · {len(meal_types)} 类餐次"),
+        _basis_component("食物多样性", min(94, 58 + len(foods) * 6), f"识别 {len(foods)} 种食物" if foods else "食物种类待补充"),
+    ]
+    if nutrient_records:
+        components.append(_basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息"))
+    calorie_target = _positive_number(details.get("daily_calorie_target_kcal"))
+    if calorie_target is not None and totals["calories_kcal"]:
+        components.append(_basis_component("能量目标", _target_band_score(totals["calories_kcal"], calorie_target), f"{totals['calories_kcal']:g}/{calorie_target:g} kcal"))
+    protein_target = _positive_number(details.get("daily_protein_target_g"))
+    if protein_target is not None and totals["protein_g"]:
+        components.append(_basis_component("蛋白质目标", _target_band_score(totals["protein_g"], protein_target, lower_is_ok=True), f"{totals['protein_g']:g}/{protein_target:g} g"))
+    score = round(mean(item["score"] for item in components))
     summary = f"记录 {len(meals)} 餐"
-    return _module(score, summary, _event_reliability(meals), {"meals": len(meals), "known_meal_types": len(meal_types), "protein_records": protein_records})
+    return _module(
+        score,
+        summary,
+        _event_reliability(meals),
+        {
+            "meals": len(meals),
+            "known_meal_types": len(meal_types),
+            "food_variety": len(foods),
+            "protein_records": protein_records,
+            "nutrient_records": nutrient_records,
+            **totals,
+        },
+        components,
+    )
 
 
 def _body_module(events: list[dict[str, Any]], history: list[dict[str, Any]]) -> dict[str, Any]:
@@ -353,7 +451,11 @@ def _body_module(events: list[dict[str, Any]], history: list[dict[str, Any]]) ->
     summary = f"体重 {current_weight} kg" if current_weight is not None else "已记录身体数据"
     if warning:
         summary = warning
-    return _module(score, summary, _event_reliability(body), metrics)
+    basis = [
+        _basis_component("测量覆盖", 88 if len(metrics) >= 3 else 76, f"本次包含 {len(metrics)} 项身体指标"),
+        _basis_component("波动复核", score, warning or "未发现需要复测的明显单次波动"),
+    ]
+    return _module(score, summary, _event_reliability(body), metrics, basis)
 
 
 def _recovery_module(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -382,15 +484,138 @@ def _recovery_module(events: list[dict[str, Any]]) -> dict[str, Any]:
         return _module(None, "暂无睡眠或感受记录", 0.0, {})
     score = round(mean(scores))
     summary = f"睡眠 {metrics['sleep_hours']} 小时" if "sleep_hours" in metrics else "已记录今日感受"
-    return _module(score, summary, _event_reliability(relevant), metrics)
+    basis = []
+    if "sleep_hours" in metrics:
+        basis.append(_basis_component("睡眠时长", 92 if 7 <= metrics["sleep_hours"] <= 9 else 76 if 6 <= metrics["sleep_hours"] <= 10 else 52, f"{metrics['sleep_hours']} 小时"))
+    if moods:
+        negative = {"tired", "stressed", "sad", "anxious", "self_harm_risk"}
+        mood_score = 55 if any(str(event["payload"].get("mood", "")) in negative for event in moods) else 82
+        basis.append(_basis_component("主观感受", mood_score, f"记录 {len(moods)} 条感受"))
+    if symptoms:
+        basis.append(_basis_component("症状负担", 50 if metrics["max_symptom_severity"] >= 7 else 68, f"最高强度 {metrics['max_symptom_severity']}/10"))
+    return _module(score, summary, _event_reliability(relevant), metrics, basis)
+
+
+def _period_movement_module(
+    events: list[dict[str, Any]], *, days: int, timezone_name: str, goal: str
+) -> dict[str, Any]:
+    exercise = _of_type(events, "exercise")
+    if not exercise:
+        return _module(None, "暂无活动记录", 0.0, {})
+    by_day = _events_by_local_day(exercise, timezone_name)
+    steps = sum(int(event["payload"].get("steps", 0)) for event in exercise)
+    duration = sum(float(event["payload"].get("duration_min", 0)) for event in exercise)
+    calories = sum(float(event["payload"].get("calories_kcal", 0)) for event in exercise)
+    strength = [event for event in exercise if _is_strength_event(event)]
+    volume = sum(_event_strength_volume(event) or 0 for event in strength)
+    intensity_values = [
+        value
+        for event in exercise
+        for value in [_exercise_intensity(event["payload"])]
+        if value is not None
+    ]
+    weeks = max(days / 7, 1 / 7)
+    active_day_target = min(days, max(1, round(5 * weeks)))
+    components = [
+        _basis_component("活动频率", _threshold_score(len(by_day) / active_day_target), f"{len(by_day)}/{active_day_target} 个目标活动日"),
+        _basis_component("活动时长", _threshold_score((duration / weeks) / 150), f"折合每周 {duration / weeks:.0f} 分钟"),
+    ]
+    strength_target = max(1, round(2 * weeks))
+    strength_score = _threshold_score(len(strength) / strength_target)
+    components.append(_basis_component("抗阻频率", strength_score, f"{len(strength)}/{strength_target} 次参考频率"))
+    if strength:
+        components.append(_basis_component("抗阻容量", 88 if volume else 68, f"累计 {volume:g} kg" if volume else "已识别抗阻训练，容量待补充"))
+    if intensity_values:
+        average_intensity = round(mean(intensity_values), 1)
+        components.append(_basis_component("训练强度", 88 if 5 <= average_intensity <= 8.5 else 72, f"可用强度记录均值 {average_intensity}/10"))
+    weights = []
+    for item in components:
+        if item["label"].startswith("抗阻") and any(token in goal for token in ("增肌", "力量", "抗阻")):
+            weights.append(1.35)
+        else:
+            weights.append(1.0)
+    score = round(sum(item["score"] * weight for item, weight in zip(components, weights)) / sum(weights))
+    return _module(
+        score,
+        f"{len(by_day)} 个活动日 · 抗阻 {len(strength)} 次",
+        _event_reliability(exercise),
+        {
+            "steps": steps,
+            "duration_min": round(duration, 1),
+            "calories_kcal": round(calories, 1),
+            "sessions": len(exercise),
+            "active_days": len(by_day),
+            "strength_sessions": len(strength),
+            "strength_volume_kg": round(volume, 1),
+            "intensity_records": len(intensity_values),
+        },
+        components,
+    )
+
+
+def _period_nutrition_module(
+    events: list[dict[str, Any]],
+    *,
+    days: int,
+    timezone_name: str,
+    profile_details: dict[str, Any],
+) -> dict[str, Any]:
+    meals = _of_type(events, "meal")
+    if not meals:
+        return _module(None, "暂无饮食记录", 0.0, {})
+    by_day = _events_by_local_day(meals, timezone_name)
+    foods = {
+        str(food).strip()
+        for event in meals
+        for food in event["payload"].get("foods", [])
+        if str(food).strip()
+    }
+    nutrient_records = sum(
+        1
+        for event in meals
+        if any(field in event["payload"] for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g"))
+    )
+    totals = {
+        field: round(sum(float(event["payload"].get(field, 0)) for event in meals), 1)
+        for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g")
+    }
+    components = [
+        _basis_component("记录覆盖", _threshold_score(len(by_day) / max(1, days)), f"{len(by_day)}/{days} 天有饮食记录"),
+        _basis_component("食物多样性", min(94, 58 + len(foods) * 2), f"识别 {len(foods)} 种食物" if foods else "食物种类待补充"),
+        _basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息"),
+    ]
+    calorie_target = _positive_number(profile_details.get("daily_calorie_target_kcal"))
+    if calorie_target is not None and totals["calories_kcal"]:
+        average_calories = totals["calories_kcal"] / max(1, len(by_day))
+        components.append(_basis_component("能量目标", _target_band_score(average_calories, calorie_target), f"有记录日均 {average_calories:.0f}/{calorie_target:g} kcal"))
+    protein_target = _positive_number(profile_details.get("daily_protein_target_g"))
+    if protein_target is not None and totals["protein_g"]:
+        average_protein = totals["protein_g"] / max(1, len(by_day))
+        components.append(_basis_component("蛋白质目标", _target_band_score(average_protein, protein_target, lower_is_ok=True), f"有记录日均 {average_protein:.0f}/{protein_target:g} g"))
+    score = round(mean(item["score"] for item in components))
+    return _module(
+        score,
+        f"{len(by_day)} 个记录日 · {len(foods)} 种食物",
+        _event_reliability(meals),
+        {
+            "meals": len(meals),
+            "record_days": len(by_day),
+            "food_variety": len(foods),
+            "nutrient_records": nutrient_records,
+            **totals,
+        },
+        components,
+    )
 
 
 def _period_modules(
-    events: list[dict[str, Any]], *, days: int, timezone_name: str
+    events: list[dict[str, Any]], *, days: int, timezone_name: str,
+    goal: str = "", profile_details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    details = profile_details or {}
     modules = {
-        "movement": _movement_module(events),
-        "nutrition": _nutrition_module(events),
+        "movement": _period_movement_module(events, days=days, timezone_name=timezone_name, goal=goal),
+        "nutrition": _period_nutrition_module(events, days=days, timezone_name=timezone_name, profile_details=details),
         "body": _body_module(events, events),
         "recovery": _recovery_module(events),
     }
@@ -400,12 +625,18 @@ def _period_modules(
         daily_scores = []
         record_days = 0
         for day_events in by_day.values():
-            daily_module = _daily_modules(day_events, events)[key]
+            daily_module = _daily_modules(
+                day_events,
+                events,
+                goal=goal,
+                profile_details=details,
+            )[key]
             if daily_module["score"] is not None:
                 record_days += 1
                 daily_scores.append(daily_module["score"])
         module["label"] = MODULE_LABELS[key]
-        module["score"] = round(mean(daily_scores)) if daily_scores else None
+        if key not in {"movement", "nutrition"}:
+            module["score"] = round(mean(daily_scores)) if daily_scores else None
         module["status"] = _status(module["score"])
         module["confidence"] = round(
             min(1.0, record_days / days * 0.7 + _event_reliability(
@@ -419,7 +650,13 @@ def _period_modules(
     return modules
 
 
-def _module(score: int | None, summary: str, confidence: float, metrics: dict[str, Any]) -> dict[str, Any]:
+def _module(
+    score: int | None,
+    summary: str,
+    confidence: float,
+    metrics: dict[str, Any],
+    basis: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "label": "",
         "score": score,
@@ -427,7 +664,90 @@ def _module(score: int | None, summary: str, confidence: float, metrics: dict[st
         "confidence": round(confidence, 3),
         "summary": summary,
         "metrics": metrics,
+        "basis": basis or [],
     }
+
+
+def _basis_component(label: str, score: int, evidence: str) -> dict[str, Any]:
+    return {
+        "label": label,
+        "score": max(0, min(100, round(score))),
+        "evidence": evidence,
+    }
+
+
+def _threshold_score(ratio: float) -> int:
+    if ratio >= 1:
+        return 92
+    if ratio >= 0.75:
+        return 84
+    if ratio >= 0.5:
+        return 74
+    if ratio > 0:
+        return 62
+    return 55
+
+
+def _target_band_score(value: float, target: float, *, lower_is_ok: bool = False) -> int:
+    ratio = value / target
+    if lower_is_ok:
+        if 0.9 <= ratio <= 1.35:
+            return 92
+        if 0.75 <= ratio <= 1.6:
+            return 80
+        return 64
+    if 0.9 <= ratio <= 1.1:
+        return 92
+    if 0.8 <= ratio <= 1.2:
+        return 80
+    return 62
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _is_strength_event(event: dict[str, Any]) -> bool:
+    payload = event["payload"]
+    activity = str(payload.get("activity") or payload.get("exercise_type") or "").lower()
+    return bool(
+        payload.get("sets")
+        or any(
+            token in activity
+            for token in (
+                "strength", "resistance", "weight", "squat", "deadlift",
+                "力量", "抗阻", "举铁", "深蹲", "硬拉",
+            )
+        )
+    )
+
+
+def _event_strength_volume(event: dict[str, Any]) -> float | None:
+    payload = event["payload"]
+    direct = _positive_number(payload.get("volume_kg"))
+    if direct is not None:
+        return direct
+    sets = _positive_number(payload.get("sets"))
+    reps = _positive_number(payload.get("reps"))
+    weight = _positive_number(payload.get("weight_kg"))
+    if sets is None or reps is None or weight is None:
+        return None
+    return sets * reps * weight
+
+
+def _exercise_intensity(payload: dict[str, Any]) -> float | None:
+    rpe = _positive_number(payload.get("rpe"))
+    if rpe is not None:
+        return min(10.0, rpe)
+    rir = _positive_number(payload.get("rir"))
+    if rir is not None:
+        return max(1.0, min(10.0, 10 - rir))
+    zone = _positive_number(payload.get("heart_rate_zone"))
+    if zone is not None:
+        return max(1.0, min(10.0, zone * 2))
+    return None
 
 
 def _weighted_score(modules: dict[str, Any]) -> int | None:
@@ -528,7 +848,7 @@ def _movement_structure(events: list[dict[str, Any]]) -> dict[str, Any]:
         activity = str(payload.get("activity", "other")).lower()
         if any(token in activity for token in ("run", "walk", "cycle", "swim", "cardio", "跑", "走", "骑", "游")):
             counts["cardio"] += 1
-        elif any(token in activity for token in ("strength", "weight", "squat", "deadlift", "力量", "深蹲", "硬拉")) or payload.get("sets"):
+        elif any(token in activity for token in ("strength", "resistance", "weight", "squat", "deadlift", "力量", "抗阻", "举铁", "深蹲", "硬拉")) or payload.get("sets"):
             counts["strength"] += 1
         else:
             counts["other"] += 1

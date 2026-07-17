@@ -14,11 +14,17 @@ Version 0.1.0 provides:
 - Deterministic text and structured-JSON health check-ins.
 - Event listing, correction, soft deletion, idempotency, and audit records.
 - First-use owner setup with goal, timezone, tracking preferences, and report times.
+- Optional owner profile details for age, height, nutrition targets, cycle tracking, and cycle reminder lead time.
 - A non-judgmental daily gap check that asks for at most three useful records.
 - A reviewable OpenClaw cron plan for gap checks and daily, weekly, and monthly reports.
 - Separate daily, weekly, and monthly deterministic health models.
-- Health score and evidence confidence as separate values.
-- Responsive local cockpit plus 1080x1920 PNG, HTML, JSON, and PDF reports.
+- Health score and evidence confidence as separate values, with visible activity,
+  resistance-volume/intensity, nutrition-coverage/diversity, body, and recovery basis.
+- A PC-first local cockpit with daily/weekly/monthly switching, event timeline,
+  report archive, five-domain raw-data inspection, and source/confidence tracing.
+- Natural-day/week/month metric comparisons, body-composition charts, cross-domain
+  association clues, cycle forecasts, and a structured owner reference library.
+- Mobile-first 1080x1920 PNG and responsive HTML reports, plus JSON and PDF archives.
 - Workspace-staged attachment manifests for Feishu and QQ delivery through OpenClaw.
 - Schema migration, verified backup/restore, privacy audit, and allowlisted release packaging.
 - A separately installable OpenClaw skill under `skill/bodynote`.
@@ -41,12 +47,19 @@ bodynote-agent --home /tmp/bodynote-dev gap-check --date 2026-07-16 --json
 bodynote-agent --home /tmp/bodynote-dev analyze --type daily --period 2026-07-16 --json
 bodynote-agent --home /tmp/bodynote-dev report generate --type daily --period 2026-07-16 --json
 bodynote-agent --home /tmp/bodynote-dev dashboard build --date 2026-07-16 --json
+bodynote-agent --home /tmp/bodynote-dev reference add --input guide.json --json
+bodynote-agent --home /tmp/bodynote-dev reference list --enabled-only --json
 bodynote-agent --home /tmp/bodynote-dev schedule plan --json
 bodynote-agent --home /tmp/bodynote-dev backup create --json
 bodynote-agent --home /tmp/bodynote-dev privacy audit --project-root . --json
 bodynote-agent --home /tmp/bodynote-dev status --json
 python3 -m unittest discover -s tests
 ```
+
+`dashboard build` writes `reports/dashboard/index.html`. The cockpit is for the
+local owner and includes raw event fields for tracing and correction. Shareable
+HTML/PNG/PDF reports are separate filtered artifacts and never include the raw
+database workspace.
 
 `setup.json` can contain:
 
@@ -55,6 +68,14 @@ python3 -m unittest discover -s tests
   "display_name": "小乐",
   "primary_goal": "稳定减脂，不牺牲睡眠",
   "timezone": "Asia/Shanghai",
+  "profile": {
+    "birth_date": "1993-06-10",
+    "height_cm": 168,
+    "daily_calorie_target_kcal": 2050,
+    "daily_protein_target_g": 125,
+    "cycle_tracking_enabled": true,
+    "cycle_reminder_days_before": 3
+  },
   "schedule": {
     "gap_check_time": "20:30",
     "daily_report_time": "22:30",
@@ -86,3 +107,8 @@ openclaw skills install ./skill/bodynote
 ```
 
 OpenClaw should use pairing/allowlists and `session.identityLinks` for Feishu, QQ, and other channel identities. BodyNote does not duplicate those controls.
+
+When the owner supplies a guide or personal note, OpenClaw may read the owner-approved
+source and extract a small structured guide card. BodyNote stores the title, version,
+scope, rules, and citations, not the full source document. Guide cards enrich trend
+explanations but cannot override deterministic safety checks.
