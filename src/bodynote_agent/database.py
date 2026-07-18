@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -124,6 +124,61 @@ CREATE TABLE IF NOT EXISTS reference_guides (
 CREATE INDEX IF NOT EXISTS idx_reference_guides_enabled
     ON reference_guides(profile_id, enabled, updated_at DESC);
 
+CREATE TABLE IF NOT EXISTS food_items (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'product',
+    brand TEXT,
+    default_serving_json TEXT NOT NULL DEFAULT '{}',
+    nutrition_per_serving_json TEXT NOT NULL DEFAULT '{}',
+    source_type TEXT NOT NULL DEFAULT 'user_confirmed',
+    notes TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_food_items_enabled
+    ON food_items(profile_id, enabled, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS food_aliases (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+    food_item_id TEXT NOT NULL REFERENCES food_items(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL,
+    normalized_alias TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(profile_id, normalized_alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_food_aliases_item
+    ON food_aliases(profile_id, food_item_id);
+
+CREATE TABLE IF NOT EXISTS meal_templates (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    meal_type TEXT NOT NULL DEFAULT 'unspecified',
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    notes TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_meal_templates_enabled
+    ON meal_templates(profile_id, enabled, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS meal_template_items (
+    id TEXT PRIMARY KEY,
+    template_id TEXT NOT NULL REFERENCES meal_templates(id) ON DELETE CASCADE,
+    food_item_id TEXT NOT NULL REFERENCES food_items(id) ON DELETE RESTRICT,
+    servings REAL NOT NULL DEFAULT 1,
+    position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(template_id, food_item_id, position)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id TEXT PRIMARY KEY,
     profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
@@ -204,6 +259,82 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_health_events_idempotency
         ON health_events(profile_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS food_items (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'product',
+            brand TEXT,
+            default_serving_json TEXT NOT NULL DEFAULT '{}',
+            nutrition_per_serving_json TEXT NOT NULL DEFAULT '{}',
+            source_type TEXT NOT NULL DEFAULT 'user_confirmed',
+            notes TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS food_aliases (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+            food_item_id TEXT NOT NULL REFERENCES food_items(id) ON DELETE CASCADE,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(profile_id, normalized_alias)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meal_templates (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL DEFAULT 'owner' REFERENCES profile(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            meal_type TEXT NOT NULL DEFAULT 'unspecified',
+            aliases_json TEXT NOT NULL DEFAULT '[]',
+            notes TEXT,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meal_template_items (
+            id TEXT PRIMARY KEY,
+            template_id TEXT NOT NULL REFERENCES meal_templates(id) ON DELETE CASCADE,
+            food_item_id TEXT NOT NULL REFERENCES food_items(id) ON DELETE RESTRICT,
+            servings REAL NOT NULL DEFAULT 1,
+            position INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(template_id, food_item_id, position)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_food_items_enabled
+        ON food_items(profile_id, enabled, updated_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_food_aliases_item
+        ON food_aliases(profile_id, food_item_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_meal_templates_enabled
+        ON meal_templates(profile_id, enabled, updated_at DESC)
         """
     )
     connection.execute(

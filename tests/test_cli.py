@@ -25,10 +25,11 @@ class CliTest(unittest.TestCase):
                 )
 
             payload = json.loads(output.getvalue())
-            self.assertEqual(payload["development_phase"], "m7-release-ready")
+            self.assertEqual(payload["development_phase"], "m8-food-library-ready")
             self.assertIn("checkin.text", payload["capabilities"])
             self.assertIn("events.delete", payload["capabilities"])
             self.assertIn("gap-check", payload["capabilities"])
+            self.assertIn("food.add", payload["capabilities"])
 
     def test_text_checkin_and_event_list(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -60,6 +61,41 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 0)
             events = json.loads(events_output.getvalue())
             self.assertEqual(events["count"], 1)
+
+    def test_food_and_template_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            home = root / "runtime"
+            food_file = root / "food.json"
+            food_file.write_text(
+                json.dumps(
+                    {
+                        "title": "示例水饺",
+                        "aliases": ["水饺"],
+                        "nutrition_per_serving": {"calories_kcal": 300, "protein_g": 25},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with redirect_stdout(io.StringIO()):
+                main(["--home", str(home), "init"])
+
+            added = io.StringIO()
+            with redirect_stdout(added):
+                self.assertEqual(
+                    main(["--home", str(home), "food", "add", "--input", str(food_file), "--json"]),
+                    0,
+                )
+            food = json.loads(added.getvalue())["food"]
+
+            resolved = io.StringIO()
+            with redirect_stdout(resolved):
+                self.assertEqual(
+                    main(["--home", str(home), "food", "resolve", "--text", "晚饭吃了水饺", "--json"]),
+                    0,
+                )
+            self.assertEqual(json.loads(resolved.getvalue())["foods"][0]["food"]["id"], food["id"])
 
     def test_structured_checkin_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

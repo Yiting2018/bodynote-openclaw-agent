@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from bodynote_agent.preferences import OnboardingService
+from bodynote_agent.food_library import FoodLibraryService
 from bodynote_agent.reports import ReportService, _pdf_period_details
 from bodynote_agent.runtime import initialize
 from bodynote_agent.service import CheckinService
@@ -43,6 +44,15 @@ class ReportTest(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def test_daily_html_and_dashboard_are_idempotent(self) -> None:
+        FoodLibraryService(self.database).add_food(
+            {
+                "title": "示例蛋白粉",
+                "category": "supplement",
+                "aliases": ["蛋白粉"],
+                "nutrition_per_serving": {"calories_kcal": 120, "protein_g": 24},
+                "source_type": "user_label",
+            }
+        )
         first = self.service.generate(
             "daily", "2026-07-16", formats=["html"]
         )
@@ -73,6 +83,9 @@ class ReportTest(unittest.TestCase):
         self.assertIn('data-period="custom"', dashboard_content)
         self.assertIn("每日评分与身体变化", dashboard_content)
         self.assertIn("raw_text", dashboard_content)
+        self.assertIn("个人食物库", dashboard_content)
+        self.assertIn("示例蛋白粉", dashboard_content)
+        self.assertIn("food_library", dashboard_content)
 
     def test_weekly_and_monthly_use_distinct_sections(self) -> None:
         weekly = self.service.generate(

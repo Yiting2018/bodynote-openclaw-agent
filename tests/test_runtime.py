@@ -20,7 +20,7 @@ class RuntimeTest(unittest.TestCase):
             self.assertTrue(Path(result["reports"]).is_dir())
 
             state = status(home)
-            self.assertEqual(state["database"]["schema_version"], 5)
+            self.assertEqual(state["database"]["schema_version"], 6)
             self.assertEqual(state["database"]["profile_count"], 1)
             self.assertEqual(state["database"]["event_count"], 0)
 
@@ -102,9 +102,26 @@ class RuntimeTest(unittest.TestCase):
                 }
                 version = connection.execute("SELECT MAX(version) FROM schema_meta").fetchone()[0]
 
-            self.assertEqual(version, 5)
+            self.assertEqual(version, 6)
             self.assertTrue(
                 {"idempotency_key", "revision", "updated_at", "deleted_at"}.issubset(columns)
+            )
+
+    def test_initialize_migrates_food_library_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            home = Path(temporary_directory) / "bodynote"
+            result = initialize(home)
+
+            with closing(sqlite3.connect(result["database"])) as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+
+            self.assertTrue(
+                {"food_items", "food_aliases", "meal_templates", "meal_template_items"}.issubset(tables)
             )
 
     def test_initialize_migrates_v2_profile_and_schedule(self) -> None:

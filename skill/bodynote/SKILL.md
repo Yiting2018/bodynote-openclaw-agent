@@ -17,7 +17,7 @@ Use the local `bodynote-agent` runtime for deterministic storage, scoring, safet
 
 ## Workflow
 
-1. Identify the task: onboarding, check-in, correction, gap check, dashboard, report, reference guide, insight, or export.
+1. Identify the task: onboarding, check-in, food-library update, correction, gap check, dashboard, report, reference guide, insight, or export.
 2. Confirm that the required runtime capability is available.
 3. Preserve the user's date, time, units, uncertainty, and original wording when structuring a record.
 4. Ask only for missing fields that materially affect the requested result.
@@ -28,6 +28,22 @@ Use the local `bodynote-agent` runtime for deterministic storage, scoring, safet
 9. Describe cross-domain findings as association clues or synchronous changes, never as proven causality.
 10. Save private records and generated artifacts locally.
 11. Return a short text summary plus artifact paths for OpenClaw to deliver.
+
+## Personal Food Library Routing
+
+- Use `food add --input food.json --json` for an owner-confirmed food, packaged product,
+  supplement, nutrition label, default serving, or explicitly approved alias.
+- Use `meal-template add --input template.json --json` only after every referenced food
+  id has been confirmed in the local food library.
+- Before adding a generic alias such as `水饺`, ask whether it should always resolve to
+  that exact brand/product. Do not infer generic aliases from one previous meal.
+- When a user says a branded name, use `food resolve --text ... --json` to inspect the
+  deterministic local match before explaining what will be recorded.
+- When no complete local match exists, keep the meal as a normal food-text record. Do
+  not fabricate nutrition totals from a partial product match.
+- A meal event already contains an immutable nutrition snapshot. Updating a food item
+  changes future check-ins only; never rewrite historical events just to apply a newer
+  package label.
 
 For a scheduled gap check, run `bodynote-agent gap-check` without `--json` so a command job can announce the concise owner-facing prompt. Use `--json` when the Agent needs structured missing-category data.
 
@@ -46,6 +62,7 @@ For report delivery, run `report generate` with `--delivery-dir .bodynote-delive
 
 - Do not diagnose disease, prescribe treatment, change medication, or promise causality.
 - Never fabricate missing measurements, dates, foods, exercises, symptoms, or report findings.
+- Do not silently assign a generic food name to a branded personal-library product.
 - Never present a cycle forecast as contraception, diagnosis, or a guaranteed date.
 - Show cycle support only when the owner explicitly enables tracking. Prefer the
   owner's repeated performance, recovery, and symptom pattern over phase-wide claims;

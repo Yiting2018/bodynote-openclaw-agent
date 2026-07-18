@@ -234,7 +234,7 @@ def _parse_exercise(text: str) -> ParsedCheckin | None:
 
 
 def _parse_meal(text: str) -> ParsedCheckin | None:
-    food_markers = ("吃了", "喝了", "早餐", "早饭", "午餐", "午饭", "晚餐", "晚饭", "加餐", "夜宵")
+    food_markers = ("吃了", "喝了", "早餐", "早饭", "午餐", "午饭", "晚餐", "晚饭", "加餐", "夜宵", "照旧", "固定餐")
     if not any(marker in text for marker in food_markers):
         return None
     meal_aliases = (

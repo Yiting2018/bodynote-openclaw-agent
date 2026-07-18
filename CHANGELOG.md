@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-18
+
+- Add a local personal food library for reusable foods, branded products, supplements, aliases, and verified nutrition per serving.
+- Add reusable meal templates for habitual meals such as a fixed breakfast.
+- Resolve meal records against local templates and food aliases, retaining an immutable nutrition snapshot with each historical event.
+- Add a local-only food library dashboard page and documented OpenClaw Skill routing for meal matching and confirmation.
+
 - Restore the PC local cockpit with daily/weekly/monthly switching, event timeline,
   report archive, and searchable raw-data inspection.
 - Redesign mobile HTML and PNG reports with a more energetic dark visual system,

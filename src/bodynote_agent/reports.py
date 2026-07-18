@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from bodynote_agent.analytics import HealthAnalysisService
 from bodynote_agent.dashboard import dashboard_snapshot, render_dashboard_html
 from bodynote_agent.database import connect, new_id
+from bodynote_agent.food_library import FoodLibraryService
 from bodynote_agent.html_report import PALETTE, event_summary, render_report_html
 from bodynote_agent.preferences import ALLOWED_REPORT_FORMATS, OnboardingService, local_date
 from bodynote_agent.trends import TrendAnalysisService
@@ -187,6 +188,7 @@ class ReportService:
             timezone_name=profile["timezone"],
             profile=profile,
         )
+        library = FoodLibraryService(self.database_path)
         snapshot = dashboard_snapshot(
             daily=daily,
             weekly=weekly,
@@ -195,6 +197,10 @@ class ReportService:
             archive=archive,
             profile=profile,
             trends=trends,
+            food_library={
+                "foods": library.list_foods()["foods"],
+                "templates": library.list_templates()["templates"],
+            },
         )
         _write_text(dashboard_path, render_dashboard_html(snapshot))
         return dashboard_path

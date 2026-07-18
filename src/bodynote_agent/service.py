@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from bodynote_agent.events import EventInput, EventRepository
+from bodynote_agent.food_library import FoodLibraryService
 from bodynote_agent.parsing import ParseError, parse_checkin_text
 from bodynote_agent.validation import validate_event
 
@@ -13,6 +14,7 @@ from bodynote_agent.validation import validate_event
 class CheckinService:
     def __init__(self, database_path: Path) -> None:
         self.repository = EventRepository(database_path)
+        self.food_library = FoodLibraryService(database_path)
 
     def record_text(
         self,
@@ -28,7 +30,8 @@ class CheckinService:
         except ParseError as error:
             return {"ok": False, "recorded": False, "error": str(error)}
 
-        validation = validate_event(parsed.event_type, parsed.payload)
+        payload = self._enrich_meal(parsed.event_type, parsed.payload, text)
+        validation = validate_event(parsed.event_type, payload)
         if not validation.ok:
             return {
                 "ok": False,
@@ -74,6 +77,8 @@ class CheckinService:
         occurred_error = _occurred_at_error(occurred_at)
         if occurred_error:
             return {"ok": False, "recorded": False, "errors": [occurred_error]}
+        raw_text = str(data.get("raw_text") or "")
+        payload = self._enrich_meal(event_type, payload, raw_text)
         validation = validate_event(event_type, payload)
         if not validation.ok:
             return {
@@ -97,7 +102,7 @@ class CheckinService:
                 payload=validation.payload,
                 source=source,
                 source_context=data.get("source_context") if isinstance(data.get("source_context"), dict) else {},
-                raw_text=str(data.get("raw_text") or "") or None,
+                raw_text=raw_text or None,
                 confidence=confidence,
                 idempotency_key=canonical_key,
             ),
@@ -182,6 +187,13 @@ class CheckinService:
         if not deleted:
             return {"ok": False, "deleted": False, "error": "记录不存在或已经删除。"}
         return {"ok": True, "deleted": True, "event_id": event_id}
+
+    def _enrich_meal(
+        self, event_type: str, payload: dict[str, Any], raw_text: str
+    ) -> dict[str, Any]:
+        if event_type != "meal" or payload.get("food_library") or not raw_text:
+            return payload
+        return self.food_library.enrich_meal(payload, raw_text)
 
     def _record_result(
         self,

@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from bodynote_agent.analytics import HealthAnalysisService
 from bodynote_agent.config import runtime_paths
+from bodynote_agent.food_library import FoodLibraryService
 from bodynote_agent.gap_check import GapCheckService
 from bodynote_agent import __version__
 from bodynote_agent.maintenance import BackupService, PrivacyAuditService, ReleaseService
@@ -172,6 +173,49 @@ def build_parser() -> argparse.ArgumentParser:
         item.add_argument("guide_id")
         item.add_argument("--json", action="store_true")
 
+    food_parser = subparsers.add_parser(
+        "food", help="Manage owner-confirmed food and product nutrition entries."
+    )
+    food_subparsers = food_parser.add_subparsers(dest="food_command", required=True)
+    food_add = food_subparsers.add_parser("add")
+    food_add.add_argument("--input", type=Path, required=True)
+    food_add.add_argument("--json", action="store_true")
+    food_list = food_subparsers.add_parser("list")
+    food_list.add_argument("--enabled-only", action="store_true")
+    food_list.add_argument("--json", action="store_true")
+    food_update = food_subparsers.add_parser("update")
+    food_update.add_argument("food_id")
+    food_update.add_argument("--input", type=Path, required=True)
+    food_update.add_argument("--json", action="store_true")
+    food_resolve = food_subparsers.add_parser("resolve")
+    food_resolve.add_argument("--text", required=True)
+    food_resolve.add_argument("--json", action="store_true")
+    for command in ("enable", "disable"):
+        item = food_subparsers.add_parser(command)
+        item.add_argument("food_id")
+        item.add_argument("--json", action="store_true")
+
+    template_parser = subparsers.add_parser(
+        "meal-template", help="Manage reusable owner meal combinations."
+    )
+    template_subparsers = template_parser.add_subparsers(
+        dest="meal_template_command", required=True
+    )
+    template_add = template_subparsers.add_parser("add")
+    template_add.add_argument("--input", type=Path, required=True)
+    template_add.add_argument("--json", action="store_true")
+    template_list = template_subparsers.add_parser("list")
+    template_list.add_argument("--enabled-only", action="store_true")
+    template_list.add_argument("--json", action="store_true")
+    template_update = template_subparsers.add_parser("update")
+    template_update.add_argument("template_id")
+    template_update.add_argument("--input", type=Path, required=True)
+    template_update.add_argument("--json", action="store_true")
+    for command in ("enable", "disable"):
+        item = template_subparsers.add_parser(command)
+        item.add_argument("template_id")
+        item.add_argument("--json", action="store_true")
+
     maintenance_parser = subparsers.add_parser(
         "maintenance", help="Run schema migrations and maintenance checks."
     )
@@ -313,6 +357,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             return _emit_result(result, json_output=args.json)
 
+        if args.command == "food":
+            library = FoodLibraryService(paths.database)
+            if args.food_command == "add":
+                result = library.add_food(_read_json_object(args.input))
+            elif args.food_command == "list":
+                result = library.list_foods(enabled_only=args.enabled_only)
+            elif args.food_command == "update":
+                result = library.update_food(args.food_id, _read_json_object(args.input))
+            elif args.food_command == "resolve":
+                result = library.resolve_text(args.text)
+            else:
+                result = library.set_food_enabled(
+                    args.food_id, args.food_command == "enable"
+                )
+            return _emit_result(result, json_output=args.json)
+
+        if args.command == "meal-template":
+            library = FoodLibraryService(paths.database)
+            if args.meal_template_command == "add":
+                result = library.add_template(_read_json_object(args.input))
+            elif args.meal_template_command == "list":
+                result = library.list_templates(enabled_only=args.enabled_only)
+            elif args.meal_template_command == "update":
+                result = library.update_template(
+                    args.template_id, _read_json_object(args.input)
+                )
+            else:
+                result = library.set_template_enabled(
+                    args.template_id, args.meal_template_command == "enable"
+                )
+            return _emit_result(result, json_output=args.json)
+
         if args.command == "maintenance":
             initialize(paths.home)
             result = status(paths.home)
@@ -442,6 +518,20 @@ def _emit_result(result: dict[str, Any], *, json_output: bool) -> int:
             print(f"{guide['id']}  {guide['title']}  {state}")
     elif "guide" in result:
         print(f"{result['guide']['title']}  {'启用' if result['guide']['enabled'] else '停用'}")
+    elif "foods" in result:
+        print(f"共 {result['count']} 个食物条目。")
+        for food in result["foods"]:
+            print(f"{food['id']}  {food['title']}")
+    elif "food" in result:
+        print(f"{result['food']['title']}  {'启用' if result['food']['enabled'] else '停用'}")
+    elif "templates" in result:
+        print(f"共 {result['count']} 个常用餐食。")
+        for template in result["templates"]:
+            print(f"{template['id']}  {template['title']}")
+    elif "template" in result:
+        print(f"{result['template']['title']}  {'启用' if result['template']['enabled'] else '停用'}")
+    elif "match" in result:
+        print(f"食物库匹配：{result['match']}")
     elif result.get("backup") and result.get("restored"):
         print(f"已恢复备份：{result['backup']}")
         print(f"恢复前安全备份：{result['safety_backup']}")

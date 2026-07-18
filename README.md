@@ -6,7 +6,7 @@ This directory is the clean development and release source. It intentionally exc
 
 ## Release Scope
 
-Version 0.1.0 provides:
+Version 0.2.0 provides:
 
 - A Python CLI with deterministic core workflows and Pillow/reportlab renderers.
 - External runtime storage under `~/.bodynote` by default.
@@ -24,6 +24,8 @@ Version 0.1.0 provides:
   report archive, five-domain raw-data inspection, and source/confidence tracing.
 - Natural-day/week/month metric comparisons, body-composition charts, cross-domain
   association clues, cycle forecasts, and a structured owner reference library.
+- A local personal food library for owner-confirmed products, aliases, serving sizes,
+  nutrition labels, and reusable meal templates with immutable meal-time snapshots.
 - Mobile-first 1080x1920 PNG and responsive HTML reports, plus JSON and PDF archives.
 - Workspace-staged attachment manifests for Feishu and QQ delivery through OpenClaw.
 - Schema migration, verified backup/restore, privacy audit, and allowlisted release packaging.
@@ -49,6 +51,9 @@ bodynote-agent --home /tmp/bodynote-dev report generate --type daily --period 20
 bodynote-agent --home /tmp/bodynote-dev dashboard build --date 2026-07-16 --json
 bodynote-agent --home /tmp/bodynote-dev reference add --input guide.json --json
 bodynote-agent --home /tmp/bodynote-dev reference list --enabled-only --json
+bodynote-agent --home /tmp/bodynote-dev food add --input food.json --json
+bodynote-agent --home /tmp/bodynote-dev meal-template add --input breakfast.json --json
+bodynote-agent --home /tmp/bodynote-dev food resolve --text "晚饭吃了野人日记水饺" --json
 bodynote-agent --home /tmp/bodynote-dev schedule plan --json
 bodynote-agent --home /tmp/bodynote-dev backup create --json
 bodynote-agent --home /tmp/bodynote-dev privacy audit --project-root . --json
@@ -112,3 +117,27 @@ When the owner supplies a guide or personal note, OpenClaw may read the owner-ap
 source and extract a small structured guide card. BodyNote stores the title, version,
 scope, rules, and citations, not the full source document. Guide cards enrich trend
 explanations but cannot override deterministic safety checks.
+
+## Personal Food Library
+
+`food add` stores an owner-confirmed food or packaged product. Its `aliases` are
+explicit local matching terms: only add a generic alias such as `水饺` after confirming
+that it should always mean the same product. `meal-template add` stores a reusable
+combination of existing food ids, such as a fixed breakfast.
+
+When a complete product or template match is recorded, BodyNote writes the computed
+nutrition plus an immutable `food_library` snapshot into that meal event. Updating a
+nutrition label later affects only future meals. A mixed meal with only some matched
+foods retains its evidence but does not invent a total calorie or macro count.
+
+```json
+{
+  "title": "野人日记高蛋白水饺",
+  "category": "product",
+  "brand": "野人日记",
+  "aliases": ["野人日记水饺", "水饺"],
+  "default_serving": {"amount": 1, "unit": "袋", "label": "1 袋"},
+  "nutrition_per_serving": {"calories_kcal": 310, "protein_g": 28, "carbs_g": 42, "fat_g": 5},
+  "source_type": "user_label"
+}
+```
