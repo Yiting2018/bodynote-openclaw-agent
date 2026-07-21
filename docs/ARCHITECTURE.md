@@ -1,5 +1,10 @@
 # 架构边界
 
+稳定的路由、时间、评分和报告规则统一定义在
+[`PRODUCT_CONTRACTS.md`](PRODUCT_CONTRACTS.md)。
+
+领域解析器位于 `src/bodynote_agent/handlers/`，`parsing.py` 只承担确定性注册和路由。记录类 Handler 共享 `HandlerResult` 契约；`CorrectionHandler` 通过 `CheckinService` 执行带修订号的更新或软删除。
+
 ## 产品定义
 
 BodyNote 是被 OpenClaw 调用的本地健康工作流，不是独立聊天应用，也不管理飞书、QQ 等渠道连接。

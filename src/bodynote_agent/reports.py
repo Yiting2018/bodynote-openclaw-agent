@@ -15,7 +15,13 @@ from bodynote_agent.analytics import HealthAnalysisService
 from bodynote_agent.dashboard import dashboard_snapshot, render_dashboard_html
 from bodynote_agent.database import connect, new_id
 from bodynote_agent.food_library import FoodLibraryService
-from bodynote_agent.html_report import PALETTE, event_summary, render_report_html
+from bodynote_agent.html_report import (
+    EVENT_LABELS,
+    PALETTE,
+    event_summary,
+    event_time_label,
+    render_report_html,
+)
 from bodynote_agent.preferences import ALLOWED_REPORT_FORMATS, OnboardingService, local_date
 from bodynote_agent.trends import TrendAnalysisService
 
@@ -82,7 +88,7 @@ class ReportService:
         )
         output_dir = self.reports_root / report_type / key
         input_hash = _hash_json(
-            {"model": model, "events": events, "formats": selected, "renderer": 8}
+            {"model": model, "events": events, "formats": selected, "renderer": 12}
         )
         duplicate = self._existing_result(report_type, key, input_hash)
         if duplicate:
@@ -114,8 +120,12 @@ class ReportService:
                 artifacts["html"] = _artifact(html_path, "html")
             if "png" in selected:
                 png_path = output_dir / "report.png"
-                _render_png(model, png_path, events=events)
-                artifacts["png"] = _artifact(png_path, "png")
+                for legacy_page in output_dir.glob("report-[0-9]*.png"):
+                    legacy_page.unlink(missing_ok=True)
+                png_paths = _render_png(model, png_path, events=events)
+                for index, rendered_path in enumerate(png_paths, start=1):
+                    artifact_key = "png" if index == 1 else f"png_{index}"
+                    artifacts[artifact_key] = _artifact(rendered_path, "png")
             if "pdf" in selected:
                 pdf_path = output_dir / "report.pdf"
                 _render_pdf(model, pdf_path)
@@ -324,11 +334,16 @@ def _normalize_formats(formats: list[str]) -> list[str]:
 
 def _render_png(
     model: dict[str, Any], path: Path, *, events: list[dict[str, Any]] | None = None
-) -> None:
+) -> list[Path]:
     try:
         from PIL import Image, ImageDraw
     except ImportError as error:
         raise RuntimeError("生成 PNG 需要 Pillow，请先安装项目依赖。") from error
+
+    events = events or []
+    if model["period_type"] == "daily":
+        _render_daily_long_png(model, path, events=events)
+        return [path]
 
     width, height = 1080, 1920
     image = Image.new("RGB", (width, height), "#08090D")
@@ -357,8 +372,12 @@ def _render_png(
     kicker = {"daily": "TODAY SIGNAL", "weekly": "WEEKLY RHYTHM", "monthly": "MONTHLY CHANGE"}[model["period_type"]]
     draw.text((48, 142), kicker, font=fonts["small"], fill=accent)
     _draw_wrapped(draw, model["summary"]["headline"], (48, 188), 650, fonts["headline"], ink, 58, max_lines=3)
-    first_insight = model["insights"][0]["explanation"] if model["insights"] else "数据正在形成你的个人健康脉络。"
-    _draw_wrapped(draw, first_insight, (48, 380), 630, fonts["small"], "#B1B6C0", 30, max_lines=3)
+    insight_overview = " · ".join(
+        str(item.get("title") or item.get("explanation") or "")
+        for item in model.get("insights", [])
+        if item.get("title") or item.get("explanation")
+    ) or "数据正在形成你的个人健康脉络。"
+    _draw_wrapped(draw, insight_overview, (48, 380), 630, fonts["small"], "#B1B6C0", 30, max_lines=3)
 
     score = model["health_score"]
     progress = (score if score is not None else round(model["confidence"] * 100)) * 3.6
@@ -390,17 +409,7 @@ def _render_png(
         _draw_wrapped(draw, note, (x + 18, y + 120), card_width - 36, fonts["tiny"], "#747B87", 22, max_lines=2)
 
     y = _draw_png_cycle(draw, model, 890, fonts, ink, muted, paper_2, line)
-    if model["period_type"] == "daily":
-        draw.text((48, y), "今天发生了什么", font=fonts["section"], fill=ink)
-        y += 52
-        for event in events[:3]:
-            draw.text((48, y + 2), event["occurred_at"][11:16], font=fonts["tiny"], fill=accent)
-            draw.ellipse((142, y + 7, 154, y + 19), fill=accent)
-            draw.line((148, y + 20, 148, y + 72), fill=line, width=2)
-            _draw_wrapped(draw, f"{event_summary(event)}", (176, y), 820, fonts["body"], ink, 31, max_lines=1)
-            draw.text((176, y + 37), f"来源：{event.get('source') or '本地记录'}", font=fonts["tiny"], fill=muted)
-            y += 76
-    elif model["period_type"] == "weekly":
+    if model["period_type"] == "weekly":
         draw.text((48, y), "跨维度关联线索", font=fonts["section"], fill=ink)
         y += 54
         relationships = model.get("trend_analysis", {}).get("relationships", [])
@@ -469,6 +478,154 @@ def _render_png(
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
     path.chmod(0o600)
+    return [path]
+
+
+def _render_daily_long_png(
+    model: dict[str, Any], path: Path, *, events: list[dict[str, Any]]
+) -> None:
+    from PIL import Image, ImageDraw
+
+    width = 1080
+    fonts = _load_pillow_fonts()
+    measure = ImageDraw.Draw(Image.new("RGB", (width, 32), "#08090D"))
+    cycle = model.get("cycle_support") or {}
+    cycle_visible = bool(
+        cycle.get("enabled")
+        and (cycle.get("support") or {}).get("visible") is not False
+    )
+
+    event_rows: list[tuple[dict[str, Any], str, int, int]] = []
+    for event in events:
+        label = EVENT_LABELS.get(event["event_type"], event["event_type"])
+        summary = f"{label} · {event_summary(event)}"
+        line_count = len(_wrapped_lines(measure, summary, 820, fonts["body"], 3))
+        event_rows.append((event, summary, line_count, max(90, line_count * 34 + 52)))
+
+    insight_rows: list[tuple[dict[str, Any], int, int]] = []
+    for insight in model.get("insights", []):
+        title_lines = len(_wrapped_lines(measure, insight.get("title") or "关键洞察", 910, fonts["card"], 2))
+        explanation_lines = len(_wrapped_lines(measure, insight.get("explanation") or "", 910, fonts["tiny"], 4))
+        insight_rows.append((insight, title_lines, max(116, 42 + title_lines * 35 + explanation_lines * 26)))
+
+    actions = model.get("actions") or [
+        {"title": "继续稳定记录", "rationale": "让趋势逐步变得可靠。", "timing": "接下来"}
+    ]
+    action_rows: list[tuple[dict[str, Any], int, int]] = []
+    for action in actions:
+        title_lines = len(_wrapped_lines(measure, action.get("title") or "下一步行动", 900, fonts["card"], 2))
+        rationale_lines = len(_wrapped_lines(measure, action.get("rationale") or "", 900, fonts["tiny"], 3))
+        action_rows.append((action, title_lines, max(140, 54 + title_lines * 35 + rationale_lines * 26)))
+
+    timeline_start = 1040 if cycle_visible else 890
+    y_after_timeline = timeline_start + 64 + sum(row[3] for row in event_rows)
+    modules_start = max(y_after_timeline + 28, 1280)
+    modules_end = modules_start + 58 + len(model["modules"]) * 64
+    insights_start = modules_end + 28
+    insights_end = insights_start + 58 + sum(row[2] + 14 for row in insight_rows)
+    actions_start = insights_end + 18
+    actions_end = actions_start + 58 + sum(row[2] + 14 for row in action_rows)
+    height = max(1920, actions_end + 100)
+
+    image = Image.new("RGB", (width, height), "#08090D")
+    draw = ImageDraw.Draw(image)
+    accent = PALETTE.get(model["status"], PALETTE["unknown"])
+    ink, muted, paper, paper_2, line = "#F6F7F9", "#9298A5", "#111318", "#181B22", "#2B3039"
+
+    for row in range(0, 610, 4):
+        ratio = row / 610
+        base = (10, 12, 16)
+        accent_rgb = tuple(int(accent[index : index + 2], 16) for index in (1, 3, 5))
+        color = tuple(int(base[i] * ratio + accent_rgb[i] * (1 - ratio) * 0.18) for i in range(3))
+        draw.rectangle((0, row, width, row + 4), fill=color)
+    draw.rectangle((48, 45, 94, 91), outline=accent, width=3)
+    draw.text((62, 52), "B", font=fonts["body"], fill=accent)
+    draw.text((112, 48), "BodyNote", font=fonts["brand"], fill=ink)
+    period_text = _period_text(model)
+    draw.text((width - 48 - draw.textlength(period_text, font=fonts["small"]), 55), period_text, font=fonts["small"], fill="#C4C8D0")
+    draw.text((48, 142), "TODAY SIGNAL", font=fonts["small"], fill=accent)
+    _draw_wrapped(draw, model["summary"]["headline"], (48, 188), 650, fonts["headline"], ink, 58, max_lines=3)
+    overview = " · ".join(str(item.get("title") or "") for item in model.get("insights", []) if item.get("title")) or "数据正在形成你的个人健康脉络。"
+    _draw_wrapped(draw, overview, (48, 380), 630, fonts["small"], "#B1B6C0", 30, max_lines=3)
+
+    score = model["health_score"]
+    progress = (score if score is not None else round(model["confidence"] * 100)) * 3.6
+    draw.ellipse((760, 158, 1012, 410), outline=line, width=22)
+    draw.arc((760, 158, 1012, 410), start=-90, end=-90 + progress, fill=accent, width=22)
+    score_text = str(score) if score is not None else "--"
+    score_box = draw.textbbox((0, 0), score_text, font=fonts["score"])
+    draw.text((886 - (score_box[2] - score_box[0]) / 2, 232), score_text, font=fonts["score"], fill=accent)
+    draw.text((839, 335), "健康状态", font=fonts["small"], fill=muted)
+    draw.text((760, 448), f"数据置信度  {round(model['confidence'] * 100)}%", font=fonts["small"], fill=muted)
+    draw.rounded_rectangle((760, 486, 1012, 496), radius=5, fill=line)
+    draw.rounded_rectangle((760, 486, 760 + int(252 * model["confidence"]), 496), radius=5, fill="#42D7E8")
+
+    draw.text((48, 642), "今日关键指标", font=fonts["section"], fill=ink)
+    metrics = _png_metrics(model, events)
+    for index, (label, value, note) in enumerate(metrics[:4]):
+        x, card_y, card_width = 38 + index * 255, 694, 237
+        draw.rounded_rectangle((x, card_y, x + card_width, card_y + 172), radius=8, fill=paper, outline=line)
+        draw.text((x + 18, card_y + 18), label, font=fonts["small"], fill=muted)
+        _draw_wrapped(draw, value, (x + 18, card_y + 60), card_width - 36, fonts["module"], [accent, "#42D7E8", "#A982FF", "#FFC857"][index], 45, max_lines=1)
+        _draw_wrapped(draw, note, (x + 18, card_y + 120), card_width - 36, fonts["tiny"], "#747B87", 22, max_lines=2)
+
+    y = _draw_png_cycle(draw, model, 890, fonts, ink, muted, paper_2, line)
+    draw.text((48, y), "今天发生了什么", font=fonts["section"], fill=ink)
+    count_text = f"共 {len(events)} 条"
+    draw.text((width - 48 - draw.textlength(count_text, font=fonts["small"]), y + 5), count_text, font=fonts["small"], fill=muted)
+    y += 64
+    if not event_rows:
+        draw.text((48, y), "今天暂无记录；未记录不等于异常。", font=fonts["small"], fill=muted)
+        y += 90
+    for event, summary, line_count, row_height in event_rows:
+        draw.text((48, y + 4), event_time_label(event), font=fonts["tiny"], fill=accent)
+        draw.ellipse((142, y + 9, 156, y + 23), fill=accent)
+        draw.line((149, y + 24, 149, y + row_height - 8), fill=line, width=2)
+        _draw_wrapped(draw, summary, (176, y), 820, fonts["body"], ink, 34, max_lines=3)
+        draw.text((176, y + line_count * 34 + 5), f"来源：{event.get('source') or '本地记录'}", font=fonts["tiny"], fill=muted)
+        y += row_height
+
+    y = max(y + 28, modules_start)
+    draw.text((48, y), "维度评分", font=fonts["section"], fill=ink)
+    y += 58
+    module_colors = [accent, "#42D7E8", "#FF7082", "#A982FF"]
+    for index, module in enumerate(model["modules"].values()):
+        draw.text((48, y), module["label"], font=fonts["small"], fill=muted)
+        draw.rounded_rectangle((190, y + 7, 900, y + 22), radius=7, fill=line)
+        fill_width = int(710 * (module["score"] or 0) / 100)
+        if fill_width:
+            draw.rounded_rectangle((190, y + 7, 190 + fill_width, y + 22), radius=7, fill=module_colors[index])
+        draw.text((938, y - 4), str(module["score"] if module["score"] is not None else "--"), font=fonts["body"], fill=ink)
+        basis = " · ".join(str(item["label"]) for item in module.get("basis", [])[:3]) or "评分证据积累中"
+        draw.text((190, y + 31), basis, font=fonts["tiny"], fill="#747B87")
+        y += 64
+
+    y += 28
+    draw.text((48, y), "关键洞察", font=fonts["section"], fill=ink)
+    y += 58
+    insight_colors = {"red": "#FF7082", "yellow": "#FFC857", "green": accent, "blue": "#42D7E8"}
+    for insight, title_lines, card_height in insight_rows:
+        color = insight_colors.get(str(insight.get("severity")), "#42D7E8")
+        draw.rounded_rectangle((38, y, width - 38, y + card_height), radius=8, fill=paper_2, outline=line)
+        draw.rectangle((38, y, 44, y + card_height), fill=color)
+        _draw_wrapped(draw, insight.get("title") or "关键洞察", (70, y + 20), 910, fonts["card"], ink, 35, max_lines=2)
+        _draw_wrapped(draw, insight.get("explanation") or "", (70, y + 25 + title_lines * 35), 910, fonts["tiny"], muted, 26, max_lines=4)
+        y += card_height + 14
+
+    y += 18
+    draw.text((48, y), "下一步行动", font=fonts["section"], fill=ink)
+    y += 58
+    for action, title_lines, card_height in action_rows:
+        draw.rounded_rectangle((38, y, width - 38, y + card_height), radius=8, fill=paper_2, outline="#66552D")
+        draw.text((70, y + 18), str(action.get("timing") or "接下来"), font=fonts["tiny"], fill="#FFC857")
+        _draw_wrapped(draw, action.get("title") or "继续稳定记录", (70, y + 48), 900, fonts["card"], ink, 35, max_lines=2)
+        _draw_wrapped(draw, action.get("rationale") or "", (70, y + 53 + title_lines * 35), 900, fonts["tiny"], muted, 26, max_lines=3)
+        y += card_height + 14
+
+    draw.text((48, height - 55), "本地生成 · 健康状态与数据完整度分开计算 · 不替代专业医疗建议", font=fonts["small"], fill="#656C77")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, format="PNG", optimize=True)
+    path.chmod(0o600)
 
 
 def _draw_png_cycle(
@@ -495,6 +652,28 @@ def _draw_png_cycle(
 def _png_metrics(
     model: dict[str, Any], events: list[dict[str, Any]]
 ) -> list[tuple[str, str, str]]:
+    if model["period_type"] == "daily":
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in events:
+            grouped.setdefault(event["event_type"], []).append(event)
+        exercises = grouped.get("exercise", [])
+        meals = grouped.get("meal", [])
+        sleep = (grouped.get("sleep") or [None])[-1]
+        body = (grouped.get("body") or [None])[-1]
+        steps = sum(int(event["payload"].get("steps") or 0) for event in exercises)
+        minutes = sum(float(event["payload"].get("duration_min") or 0) for event in exercises)
+        totals = {
+            field: sum(float(event["payload"].get(field) or 0) for event in meals)
+            for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g")
+        }
+        sleep_hours = sleep["payload"].get("duration_hours") if sleep else None
+        weight = body["payload"].get("weight_kg") if body else None
+        return [
+            ("饮食能量", f"{totals['calories_kcal']:g} kcal" if totals["calories_kcal"] else f"{len(meals)} 餐", "来自已记录饮食"),
+            ("三大营养素", f"P {totals['protein_g']:g} g" if any(totals.values()) else "待补充", f"C {totals['carbs_g']:g} g · F {totals['fat_g']:g} g" if any(totals.values()) else "蛋白 · 碳水 · 脂肪"),
+            ("今日活动", f"{steps:,} 步" if steps else f"{minutes:g} 分" if minutes else "未记录", f"{len(exercises)} 条活动记录"),
+            ("恢复与身体", f"{sleep_hours} h" if sleep_hours is not None else "未记录", f"体重 {weight} kg" if weight is not None else "睡眠 · 体重趋势"),
+        ]
     trend = model.get("trend_analysis", {})
     trend_metrics = trend.get("metrics", {})
     keys = {
@@ -532,21 +711,7 @@ def _png_metrics(
             ("饮食", f"{consistency['meal_days']} 天", "饮食模式覆盖"),
             ("睡眠", f"{consistency['sleep_days']} 天", "恢复趋势覆盖"),
         ]
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for event in events:
-        grouped.setdefault(event["event_type"], []).append(event)
-    exercises = grouped.get("exercise", [])
-    meals = grouped.get("meal", [])
-    sleep = (grouped.get("sleep") or [None])[-1]
-    body = (grouped.get("body") or [None])[-1]
-    steps = sum(int(event["payload"].get("steps") or 0) for event in exercises)
-    minutes = sum(int(event["payload"].get("duration_min") or 0) for event in exercises)
-    return [
-        ("活动", f"{steps:,} 步" if steps else f"{minutes} 分" if minutes else "未记录", f"{len(exercises)} 条运动记录"),
-        ("饮食", f"{len(meals)} 餐", "能量与营养结构"),
-        ("睡眠", f"{sleep['payload'].get('duration_hours')} h" if sleep else "未记录", str(sleep["payload"].get("quality") or "恢复证据") if sleep else "恢复证据"),
-        ("体重", f"{body['payload'].get('weight_kg')} kg" if body and body["payload"].get("weight_kg") is not None else "未记录", "身体趋势基线"),
-    ]
+    return rich
 
 
 def _load_pillow_fonts() -> dict[str, Any]:
@@ -567,16 +732,18 @@ def _load_pillow_fonts() -> dict[str, Any]:
         "brand": ImageFont.truetype(font_path, 34),
         "score": ImageFont.truetype(font_path, 76),
         "headline": ImageFont.truetype(font_path, 42),
-        "section": ImageFont.truetype(font_path, 29),
+        "section": ImageFont.truetype(font_path, 34),
         "module": ImageFont.truetype(font_path, 42),
-        "card": ImageFont.truetype(font_path, 25),
-        "body": ImageFont.truetype(font_path, 23),
-        "small": ImageFont.truetype(font_path, 19),
-        "tiny": ImageFont.truetype(font_path, 16),
+        "card": ImageFont.truetype(font_path, 29),
+        "body": ImageFont.truetype(font_path, 28),
+        "small": ImageFont.truetype(font_path, 24),
+        "tiny": ImageFont.truetype(font_path, 20),
     }
 
 
-def _draw_wrapped(draw: Any, text: str, position: tuple[int, int], max_width: int, font: Any, fill: str, line_height: int, *, max_lines: int) -> int:
+def _wrapped_lines(
+    draw: Any, text: str, max_width: int, font: Any, max_lines: int
+) -> list[str]:
     lines: list[str] = []
     current = ""
     for char in str(text):
@@ -591,6 +758,11 @@ def _draw_wrapped(draw: Any, text: str, position: tuple[int, int], max_width: in
                 break
     if current and len(lines) < max_lines:
         lines.append(current)
+    return lines
+
+
+def _draw_wrapped(draw: Any, text: str, position: tuple[int, int], max_width: int, font: Any, fill: str, line_height: int, *, max_lines: int) -> int:
+    lines = _wrapped_lines(draw, str(text), max_width, font, max_lines)
     x, y = position
     for line in lines:
         draw.text((x, y), line, font=font, fill=fill)
@@ -640,7 +812,7 @@ def _render_pdf(model: dict[str, Any], path: Path) -> None:
     module_rows = [["维度", "状态分", "证据置信度", "摘要"]]
     for module in model["modules"].values():
         basis = "；".join(
-            f"{item['label']} {item['score']}：{item['evidence']}"
+            f"{item['label']} {item['score'] if item['score'] is not None else '--'}：{item['evidence']}"
             for item in module.get("basis", [])
         ) or "评分证据积累中"
         module_rows.append([module["label"], str(module["score"] if module["score"] is not None else "暂无"), f"{round(module['confidence'] * 100)}%", Paragraph(f"{stdlib_html.escape(_pdf_text(module['summary']))}<br/><font size='8'>{stdlib_html.escape(_pdf_text(basis))}</font>", body)])
@@ -742,8 +914,12 @@ def _pdf_period_details(model: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def _delivery_attachments(artifacts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    order = ("png", "pdf", "html")
-    return [{"path": artifacts[key]["path"], "mime_type": artifacts[key]["mime_type"], "title": f"BodyNote {key.upper()} 报告", "size_bytes": artifacts[key]["size_bytes"], "sha256": artifacts[key]["sha256"]} for key in order if key in artifacts]
+    png_keys = sorted(
+        (key for key in artifacts if key == "png" or key.startswith("png_")),
+        key=lambda key: 1 if key == "png" else int(key.split("_", 1)[1]),
+    )
+    order = [*png_keys, *(key for key in ("pdf", "html") if key in artifacts)]
+    return [{"path": artifacts[key]["path"], "mime_type": artifacts[key]["mime_type"], "title": f"BodyNote {key.upper()} 报告", "size_bytes": artifacts[key]["size_bytes"], "sha256": artifacts[key]["sha256"]} for key in order]
 
 
 def _stage_attachments(
@@ -758,12 +934,19 @@ def _stage_attachments(
         directory.mkdir(parents=True, exist_ok=True)
         directory.chmod(0o700)
     staged = []
+    for legacy_page in target_dir.glob(
+        f"bodynote-{report_type}-{period_key}-[0-9]*.png"
+    ):
+        legacy_page.unlink(missing_ok=True)
+    extension_counts: dict[str, int] = {}
     for attachment in attachments:
         source = Path(attachment["path"]).resolve()
         extension = source.suffix.lower()
         if extension not in {".png", ".pdf", ".html"}:
             continue
-        target = target_dir / f"bodynote-{report_type}-{period_key}{extension}"
+        extension_counts[extension] = extension_counts.get(extension, 0) + 1
+        suffix = "" if extension_counts[extension] == 1 else f"-{extension_counts[extension]}"
+        target = target_dir / f"bodynote-{report_type}-{period_key}{suffix}{extension}"
         shutil.copy2(source, target)
         target.chmod(0o600)
         item = dict(attachment)

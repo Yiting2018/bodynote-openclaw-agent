@@ -72,6 +72,53 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(updated["event"]["revision"], 2)
         self.assertIn("修正", updated["event"]["raw_text"])
 
+    def test_natural_language_correction_updates_latest_matching_event(self) -> None:
+        created = self.service.record_text("今早体重61.2kg", now=NOW)
+        corrected = self.service.record_text("刚才说错了，是62.5kg", now=NOW)
+        self.assertTrue(corrected["corrected"])
+        self.assertFalse(corrected["recorded"])
+        self.assertEqual(corrected["handler"], "CorrectionHandler")
+        self.assertEqual(corrected["event"]["id"], created["event"]["id"])
+        self.assertEqual(corrected["event"]["payload"]["weight_kg"], 62.5)
+        self.assertEqual(corrected["event"]["revision"], 2)
+
+    def test_natural_language_correction_changes_meal_type(self) -> None:
+        created = self.service.record_text("午餐吃了酸奶", now=NOW)
+        corrected = self.service.record_text("那顿不是午餐，是下午茶", now=NOW)
+        self.assertTrue(corrected["corrected"])
+        self.assertEqual(corrected["event"]["id"], created["event"]["id"])
+        self.assertEqual(corrected["event"]["payload"]["meal_type"], "snack")
+
+    def test_natural_language_correction_changes_occurrence_time(self) -> None:
+        self.service.record_text("昨晚睡了7小时", now=NOW)
+        corrected = self.service.record_text("睡眠时间改成昨天晚上11点", now=NOW)
+        self.assertTrue(corrected["corrected"])
+        self.assertEqual(corrected["event"]["occurred_at"], "2026-07-15T23:00:00+08:00")
+        self.assertEqual(corrected["event"]["payload"]["duration_hours"], 7.0)
+
+    def test_natural_language_delete_soft_deletes_latest_event(self) -> None:
+        created = self.service.record_text("今天走了8000步", now=NOW)
+        deleted = self.service.record_text("删除刚才那条记录", now=NOW)
+        self.assertTrue(deleted["corrected"])
+        self.assertEqual(deleted["target_event"]["id"], created["event"]["id"])
+        self.assertEqual(self.service.list_events()["count"], 0)
+
+    def test_correction_targets_last_created_even_when_it_is_retroactive(self) -> None:
+        existing = self.service.record_text("今天走了8000步", now=NOW)
+        retroactive = self.service.record_text(
+            "昨天体重61.2kg",
+            now=NOW,
+        )
+        corrected = self.service.record_text("刚才说错了，是62.5kg", now=NOW)
+        self.assertEqual(corrected["event"]["id"], retroactive["event"]["id"])
+        self.assertEqual(self.service.get_event(existing["event"]["id"])["event"]["payload"]["steps"], 8000)
+
+    def test_record_result_exposes_handler_route_contract(self) -> None:
+        result = self.service.record_text("今天走了8000步", now=NOW)
+        self.assertEqual(result["route"]["intent"], "record_exercise")
+        self.assertEqual(result["route"]["handler"], "ExerciseHandler")
+        self.assertEqual(result["route"]["required_fields"], ["activity"])
+
     def test_soft_delete_hides_event(self) -> None:
         created = self.service.record_text("今早体重61.2kg", now=NOW)
         event_id = created["event"]["id"]

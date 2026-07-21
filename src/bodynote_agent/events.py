@@ -128,6 +128,24 @@ class EventRepository:
             row = self._get(connection, event_id, include_deleted=include_deleted)
             return self._serialize(row) if row else None
 
+    def latest_created(self, *, event_type: str | None = None) -> dict[str, Any] | None:
+        clauses = ["profile_id = 'owner'", "deleted_at IS NULL"]
+        parameters: list[Any] = []
+        if event_type:
+            clauses.append("event_type = ?")
+            parameters.append(event_type)
+        with closing(connect(self.database_path)) as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM health_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                parameters,
+            ).fetchone()
+            return self._serialize(row) if row else None
+
     def list_period(
         self,
         *,

@@ -7,6 +7,15 @@ description: Use BodyNote when the user wants OpenClaw to record or correct pers
 
 Use the local `bodynote-agent` runtime for deterministic storage, scoring, safety checks, scheduling, reports, backups, and release-safe exports. Let OpenClaw own channel pairing, sender authorization, sessions, cross-channel identity links, cron execution, and message delivery.
 
+## Quick Reference: Common Pitfalls
+
+- `meal.payload.foods` must be a list of strings, never one string.
+- `exercise.payload.activity` is required, even when steps or duration are present.
+- Food aliases must identify one item; avoid generic aliases such as “一勺” for multiple foods.
+- A `body` event needs at least one numeric body measurement.
+- Meal type and occurrence time are independent. Pass an explicit ISO timestamp or `--at` when the actual time is known.
+- Corrections such as “刚才说错了，是 62.5kg” update the matching recent event; do not create a duplicate event.
+
 ## Preconditions
 
 - Run `bodynote-agent status --json` before invoking a workflow.

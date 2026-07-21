@@ -8,6 +8,7 @@ from typing import Any, Sequence
 
 from bodynote_agent.analytics import HealthAnalysisService
 from bodynote_agent.config import runtime_paths
+from bodynote_agent.database import initialize_database
 from bodynote_agent.food_library import FoodLibraryService
 from bodynote_agent.gap_check import GapCheckService
 from bodynote_agent import __version__
@@ -43,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     checkin_input.add_argument("--input", type=Path, help="Structured event JSON file.")
     checkin_parser.add_argument("--source", default="openclaw")
     checkin_parser.add_argument("--idempotency-key")
+    checkin_parser.add_argument(
+        "--at",
+        dest="occurred_at",
+        help="Override occurrence time for text check-ins with an ISO 8601 timestamp.",
+    )
     checkin_parser.add_argument("--context", type=Path, help="Optional source-context JSON file.")
     checkin_parser.add_argument("--json", action="store_true")
 
@@ -293,6 +299,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             json_output=getattr(args, "json", False),
         )
     try:
+        # Every normal command is also an upgrade entry point.  Migrations are
+        # additive and idempotent, so an existing runtime never needs a manual
+        # `init` after installing a newer BodyNote version.
+        initialize_database(paths.database)
         if args.command == "onboarding":
             onboarding = OnboardingService(paths.database)
             if args.onboarding_command == "status":
@@ -436,6 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source=args.source,
                     source_context=context,
                     idempotency_key=args.idempotency_key,
+                    occurred_at=args.occurred_at,
                 )
             return _emit_result(result, json_output=args.json)
 

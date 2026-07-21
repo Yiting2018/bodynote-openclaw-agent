@@ -93,6 +93,12 @@ def validate_event(event_type: str, payload: dict[str, Any]) -> ValidationResult
         _range(normalized, "severity", 1, 10, errors)
     elif event_type == "menstrual_cycle":
         _range(normalized, "cycle_day", 1, 60, errors)
+    elif event_type == "medical_report":
+        if not str(normalized.get("report_type") or "").strip():
+            errors.append("医疗报告缺少报告类型。")
+        for key in ("findings", "action_candidates"):
+            if key in normalized and not isinstance(normalized[key], list):
+                errors.append(f"{key} 必须是 list。")
 
     if normalized.get("red_flags"):
         warnings.append("safety_attention_required")

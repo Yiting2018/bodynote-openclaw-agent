@@ -93,6 +93,7 @@ class HealthAnalysisService:
         confidence = round(coverage * 0.75 + reliability * 0.25, 3)
         urgent = _urgent_events(events)
         score = _weighted_score(modules)
+        score = _apply_daily_score_guards(score, modules)
         if urgent:
             score = min(score if score is not None else 59, 59)
         status = _status(score, urgent=bool(urgent))
@@ -399,20 +400,24 @@ def _nutrition_module(
         for event in meals
         if any(field in event["payload"] for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g"))
     )
-    components = [
+    quality_components = [
         _basis_component("餐次覆盖", min(94, 60 + len(meals) * 11), f"记录 {len(meals)} 餐 · {len(meal_types)} 类餐次"),
         _basis_component("食物多样性", min(94, 58 + len(foods) * 6), f"识别 {len(foods)} 种食物" if foods else "食物种类待补充"),
     ]
     if nutrient_records:
-        components.append(_basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息"))
+        quality_components.append(_basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息"))
+    state_components: list[dict[str, Any]] = []
     calorie_target = _positive_number(details.get("daily_calorie_target_kcal"))
     if calorie_target is not None and totals["calories_kcal"]:
-        components.append(_basis_component("能量目标", _target_band_score(totals["calories_kcal"], calorie_target), f"{totals['calories_kcal']:g}/{calorie_target:g} kcal"))
+        state_components.append(_basis_component("能量目标", _target_band_score(totals["calories_kcal"], calorie_target), f"{totals['calories_kcal']:g}/{calorie_target:g} kcal"))
     protein_target = _positive_number(details.get("daily_protein_target_g"))
     if protein_target is not None and totals["protein_g"]:
-        components.append(_basis_component("蛋白质目标", _target_band_score(totals["protein_g"], protein_target, lower_is_ok=True), f"{totals['protein_g']:g}/{protein_target:g} g"))
-    score = round(mean(item["score"] for item in components))
+        state_components.append(_basis_component("蛋白质目标", _target_band_score(totals["protein_g"], protein_target, lower_is_ok=True), f"{totals['protein_g']:g}/{protein_target:g} g"))
+    score = round(mean(item["score"] for item in state_components)) if state_components else None
+    data_quality_score = round(mean(item["score"] for item in quality_components))
     summary = f"记录 {len(meals)} 餐"
+    if score is None:
+        summary += " · 缺少个人目标，暂不评价摄入状态"
     return _module(
         score,
         summary,
@@ -423,9 +428,14 @@ def _nutrition_module(
             "food_variety": len(foods),
             "protein_records": protein_records,
             "nutrient_records": nutrient_records,
+            "data_quality_score": data_quality_score,
+            "calorie_target_kcal": calorie_target,
+            "protein_target_g": protein_target,
+            "calorie_ratio": round(totals["calories_kcal"] / calorie_target, 3) if calorie_target and totals["calories_kcal"] else None,
+            "protein_ratio": round(totals["protein_g"] / protein_target, 3) if protein_target and totals["protein_g"] else None,
             **totals,
         },
-        components,
+        [*state_components, *quality_components],
     )
 
 
@@ -434,7 +444,7 @@ def _body_module(events: list[dict[str, Any]], history: list[dict[str, Any]]) ->
     if not body:
         return _module(None, "暂无身体数据", 0.0, {})
     latest = body[-1]["payload"]
-    score = 85
+    score = None
     warning = None
     weights = [
         float(event["payload"]["weight_kg"])
@@ -442,19 +452,31 @@ def _body_module(events: list[dict[str, Any]], history: list[dict[str, Any]]) ->
         if "weight_kg" in event["payload"]
     ]
     current_weight = latest.get("weight_kg")
+    baseline = None
+    deviation_ratio = None
     if current_weight is not None and len(weights) >= 3:
         baseline = mean(weights[:-1]) if len(weights) > 1 else weights[0]
-        if baseline and abs(float(current_weight) - baseline) / baseline >= 0.03:
-            score = 65
-            warning = "与近期记录差异较大，先复测并观察水分等影响"
+        if baseline:
+            deviation_ratio = abs(float(current_weight) - baseline) / baseline
+            score = 88 if deviation_ratio < 0.03 else 72 if deviation_ratio < 0.05 else 60
+            if deviation_ratio >= 0.03:
+                warning = "与近期个人基线差异较大，先复测并观察水分等影响"
     metrics = {key: latest[key] for key in ("weight_kg", "body_fat_pct", "waist_cm", "skeletal_muscle_kg") if key in latest}
     summary = f"体重 {current_weight} kg" if current_weight is not None else "已记录身体数据"
     if warning:
         summary = warning
+    elif score is None:
+        summary += " · 个人基线积累中，暂不评价状态"
     basis = [
-        _basis_component("测量覆盖", 88 if len(metrics) >= 3 else 76, f"本次包含 {len(metrics)} 项身体指标"),
-        _basis_component("波动复核", score, warning or "未发现需要复测的明显单次波动"),
+        _basis_component("测量覆盖", 88 if len(metrics) >= 3 else 76, f"本次包含 {len(metrics)} 项身体指标", kind="data_quality"),
     ]
+    if score is not None:
+        basis.append(_basis_component("个人基线波动", score, warning or f"相对近期基线波动 {deviation_ratio:.1%}", kind="state"))
+    else:
+        basis.append(_basis_component("个人基线", None, "至少需要 3 次同类测量后再判断波动", kind="insufficient"))
+    metrics["data_quality_score"] = 88 if len(metrics) >= 3 else 76
+    metrics["baseline_weight_kg"] = round(baseline, 2) if baseline is not None else None
+    metrics["deviation_ratio"] = round(deviation_ratio, 4) if deviation_ratio is not None else None
     return _module(score, summary, _event_reliability(body), metrics, basis)
 
 
@@ -472,7 +494,7 @@ def _recovery_module(events: list[dict[str, Any]]) -> dict[str, Any]:
             scores.append(92 if 7 <= hours <= 9 else 76 if 6 <= hours <= 10 else 52)
     if moods:
         mood_values = [str(event["payload"].get("mood", "")) for event in moods]
-        negative = {"tired", "stressed", "sad", "anxious", "self_harm_risk"}
+        negative = {"tired", "fatigued", "stressed", "sad", "low", "anxious", "irritable", "self_harm_risk"}
         scores.append(55 if any(value in negative for value in mood_values) else 82)
         metrics["mood_records"] = len(moods)
     if symptoms:
@@ -488,7 +510,7 @@ def _recovery_module(events: list[dict[str, Any]]) -> dict[str, Any]:
     if "sleep_hours" in metrics:
         basis.append(_basis_component("睡眠时长", 92 if 7 <= metrics["sleep_hours"] <= 9 else 76 if 6 <= metrics["sleep_hours"] <= 10 else 52, f"{metrics['sleep_hours']} 小时"))
     if moods:
-        negative = {"tired", "stressed", "sad", "anxious", "self_harm_risk"}
+        negative = {"tired", "fatigued", "stressed", "sad", "low", "anxious", "irritable", "self_harm_risk"}
         mood_score = 55 if any(str(event["payload"].get("mood", "")) in negative for event in moods) else 82
         basis.append(_basis_component("主观感受", mood_score, f"记录 {len(moods)} 条感受"))
     if symptoms:
@@ -579,20 +601,22 @@ def _period_nutrition_module(
         field: round(sum(float(event["payload"].get(field, 0)) for event in meals), 1)
         for field in ("calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g")
     }
-    components = [
-        _basis_component("记录覆盖", _threshold_score(len(by_day) / max(1, days)), f"{len(by_day)}/{days} 天有饮食记录"),
-        _basis_component("食物多样性", min(94, 58 + len(foods) * 2), f"识别 {len(foods)} 种食物" if foods else "食物种类待补充"),
-        _basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息"),
+    quality_components = [
+        _basis_component("记录覆盖", _threshold_score(len(by_day) / max(1, days)), f"{len(by_day)}/{days} 天有饮食记录", kind="data_quality"),
+        _basis_component("食物多样性", min(94, 58 + len(foods) * 2), f"识别 {len(foods)} 种食物" if foods else "食物种类待补充", kind="data_quality"),
+        _basis_component("营养素完整度", round(60 + 34 * nutrient_records / len(meals)), f"{nutrient_records}/{len(meals)} 餐包含营养信息", kind="data_quality"),
     ]
+    state_components: list[dict[str, Any]] = []
     calorie_target = _positive_number(profile_details.get("daily_calorie_target_kcal"))
     if calorie_target is not None and totals["calories_kcal"]:
         average_calories = totals["calories_kcal"] / max(1, len(by_day))
-        components.append(_basis_component("能量目标", _target_band_score(average_calories, calorie_target), f"有记录日均 {average_calories:.0f}/{calorie_target:g} kcal"))
+        state_components.append(_basis_component("能量目标", _target_band_score(average_calories, calorie_target), f"有记录日均 {average_calories:.0f}/{calorie_target:g} kcal", kind="state"))
     protein_target = _positive_number(profile_details.get("daily_protein_target_g"))
     if protein_target is not None and totals["protein_g"]:
         average_protein = totals["protein_g"] / max(1, len(by_day))
-        components.append(_basis_component("蛋白质目标", _target_band_score(average_protein, protein_target, lower_is_ok=True), f"有记录日均 {average_protein:.0f}/{protein_target:g} g"))
-    score = round(mean(item["score"] for item in components))
+        state_components.append(_basis_component("蛋白质目标", _target_band_score(average_protein, protein_target, lower_is_ok=True), f"有记录日均 {average_protein:.0f}/{protein_target:g} g", kind="state"))
+    score = round(mean(item["score"] for item in state_components)) if state_components else None
+    data_quality_score = round(mean(item["score"] for item in quality_components))
     return _module(
         score,
         f"{len(by_day)} 个记录日 · {len(foods)} 种食物",
@@ -602,9 +626,10 @@ def _period_nutrition_module(
             "record_days": len(by_day),
             "food_variety": len(foods),
             "nutrient_records": nutrient_records,
+            "data_quality_score": data_quality_score,
             **totals,
         },
-        components,
+        [*state_components, *quality_components],
     )
 
 
@@ -668,11 +693,12 @@ def _module(
     }
 
 
-def _basis_component(label: str, score: int, evidence: str) -> dict[str, Any]:
+def _basis_component(label: str, score: int | None, evidence: str, *, kind: str = "state") -> dict[str, Any]:
     return {
         "label": label,
-        "score": max(0, min(100, round(score))),
+        "score": None if score is None else max(0, min(100, round(score))),
         "evidence": evidence,
+        "kind": kind,
     }
 
 
@@ -759,6 +785,21 @@ def _weighted_score(modules: dict[str, Any]) -> int | None:
     return round(weighted / total_weight)
 
 
+def _apply_daily_score_guards(
+    score: int | None, modules: dict[str, Any]
+) -> int | None:
+    """Keep a large target deviation from being presented as fully green.
+
+    This is a target-adherence guard, not a medical risk classification.
+    """
+    nutrition = modules["nutrition"]["metrics"]
+    severe_deviation = (
+        (nutrition.get("calorie_ratio") or 0) >= 1.5
+        or (nutrition.get("protein_ratio") or 0) >= 2.0
+    )
+    return min(score, 79) if score is not None and severe_deviation else score
+
+
 def _status(score: int | None, *, urgent: bool = False) -> str:
     if urgent:
         return "red"
@@ -792,13 +833,19 @@ def _daily_insights(events: list[dict[str, Any]], modules: dict[str, Any], missi
     recovery = modules["recovery"]
     if recovery["metrics"].get("sleep_hours", 24) < 6:
         cards.append(_insight("explanation", "yellow", "恢复可能不足", "睡眠不足 6 小时，今天的疲劳或训练感受可能受其影响。", [f"睡眠 {recovery['metrics']['sleep_hours']} 小时"], recovery["confidence"], "明天优先保证睡眠窗口，训练降一级强度。"))
+    nutrition = modules["nutrition"]
+    calorie_ratio = nutrition["metrics"].get("calorie_ratio")
+    protein_ratio = nutrition["metrics"].get("protein_ratio")
+    if calorie_ratio is not None and calorie_ratio >= 1.2:
+        cards.append(_insight("explanation", "yellow", "今天的能量摄入高于个人目标", "这是单日目标偏离，不需要通过极端节食或补偿性运动处理。", [f"能量 {nutrition['metrics']['calories_kcal']:g}/{nutrition['metrics']['calorie_target_kcal']:g} kcal"], nutrition["confidence"], "明天回到平常的饮食结构和目标区间即可。"))
+    elif protein_ratio is not None and protein_ratio >= 1.6:
+        cards.append(_insight("explanation", "yellow", "蛋白质摄入已明显超过个人目标", "今天无需继续额外补充蛋白质，优先保持整体饮食均衡。", [f"蛋白质 {nutrition['metrics']['protein_g']:g}/{nutrition['metrics']['protein_target_g']:g} g"], nutrition["confidence"], "下一餐按正常结构进食即可。"))
     movement = modules["movement"]
     if movement["metrics"].get("steps", 0) >= 8000 or movement["metrics"].get("duration_min", 0) >= 30:
         cards.append(_insight("achievement", "green", "今日活动目标已形成", movement["summary"], [movement["summary"]], movement["confidence"], "保持当前节奏，明天无需额外加量。"))
     if missing:
         labels = [MODULE_LABELS.get(field, field) for field in missing]
         cards.append(_insight("gap", "blue", "数据仍有缺口", "缺少的记录会降低判断置信度，但不会自动判定健康状态差。", labels, 1.0, "方便时补一句；不补也可按现有数据生成报告。"))
-    nutrition = modules["nutrition"]
     if nutrition["metrics"].get("meals", 0) >= 3:
         cards.append(_insight("completion", "green", "饮食记录较完整", nutrition["summary"], [f"{nutrition['metrics']['meals']} 餐"], nutrition["confidence"], "继续保留主要餐次和大致份量。"))
     if not cards:
@@ -807,36 +854,87 @@ def _daily_insights(events: list[dict[str, Any]], modules: dict[str, Any], missi
 
 
 def _daily_actions(events: list[dict[str, Any]], modules: dict[str, Any], missing: list[str], urgent: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    actions: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
     if urgent:
-        actions.append(_action("urgent", "优先确认安全", "现在", "如症状严重、突然出现或加重，及时联系当地急救或医疗机构。"))
-    if modules["recovery"]["metrics"].get("sleep_hours", 24) < 6:
-        actions.append(_action("recovery", "把明晚睡眠窗口提前 30 分钟", "明晚", "先恢复，再决定是否维持训练强度。"))
+        candidates.append(_action_candidate("urgent", "优先确认安全", "现在", "如症状严重、突然出现或加重，及时联系当地急救或医疗机构。", evidence=["记录包含安全关注信号"], urgency=100, benefit=100, confidence=1.0, safety="urgent"))
+    nutrition = modules["nutrition"]["metrics"]
+    if (nutrition.get("calorie_ratio") or 0) >= 1.2:
+        candidates.append(_action_candidate("nutrition", "明天回到平常的饮食结构", "明天", "今天高于个人能量目标，但不需要补偿性节食或额外加练。", evidence=[f"能量为个人目标的 {nutrition['calorie_ratio']:.0%}"], urgency=72, benefit=78, confidence=modules["nutrition"]["confidence"], safety="avoid_compensation"))
+    elif (nutrition.get("protein_ratio") or 0) >= 1.6:
+        candidates.append(_action_candidate("nutrition", "下一餐不再额外补充蛋白质", "下一餐", "今天已经明显超过个人蛋白质目标，正常均衡进食即可。", evidence=[f"蛋白质为个人目标的 {nutrition['protein_ratio']:.0%}"], urgency=65, benefit=65, confidence=modules["nutrition"]["confidence"]))
+    sleep_hours = modules["recovery"]["metrics"].get("sleep_hours")
+    if sleep_hours is not None and sleep_hours < 6:
+        candidates.append(_action_candidate("recovery", "把明晚睡眠窗口提前 30 分钟", "明晚", "先恢复，再决定是否维持训练强度。", evidence=[f"睡眠 {sleep_hours:g} 小时"], urgency=80, benefit=84, confidence=modules["recovery"]["confidence"], safety="reduce_load_if_fatigued"))
+    elif sleep_hours is not None and sleep_hours < 7:
+        candidates.append(_action_candidate("recovery", "明晚争取多留 30 分钟睡眠窗口", "明晚", "今天睡眠略少于常用参考区间，不需要因此补偿性调整饮食或运动。", evidence=[f"睡眠 {sleep_hours:g} 小时"], urgency=45, benefit=58, confidence=modules["recovery"]["confidence"]))
     if "movement" in missing:
-        actions.append(_action("record", "补记活动或确认休息日", "今天", "缺记录不等于没有活动，补一句即可。"))
+        candidates.append(_action_candidate("record", "补记活动或确认休息日", "今天", "缺记录不等于没有活动，补一句即可。", evidence=["活动记录缺失"], urgency=25, benefit=35, confidence=1.0))
     elif modules["movement"]["score"] is not None and modules["movement"]["score"] < 70:
-        actions.append(_action("movement", "安排 10-15 分钟轻活动", "明天", "以可持续完成为准，不追求补偿性运动。"))
+        candidates.append(_action_candidate("movement", "安排 10-15 分钟轻活动", "明天", "以可持续完成为准，不追求补偿性运动。", evidence=[modules["movement"]["summary"]], urgency=40, benefit=58, confidence=modules["movement"]["confidence"], safety="light_only"))
     if "nutrition" in missing:
-        actions.append(_action("record", "补记一顿主要餐食", "今天", "写下食物名称即可，不要求精确热量。"))
-    if not actions:
-        actions.append(_action("maintain", "保持今天最容易坚持的一项", "明天", "不额外加码，先让行为稳定重复。"))
-    return _unique_actions(actions)
+        candidates.append(_action_candidate("record", "补记一顿主要餐食", "今天", "写下食物名称即可，不要求精确热量。", evidence=["饮食记录缺失"], urgency=25, benefit=35, confidence=1.0))
+    if not candidates:
+        steps = modules["movement"]["metrics"].get("steps", 0)
+        sleep_hours = modules["recovery"]["metrics"].get("sleep_hours")
+        meals = modules["nutrition"]["metrics"].get("meals", 0)
+        if steps:
+            candidates.append(_action_candidate("maintain", f"明天延续约 {steps} 步的活动节奏", "明天", "当前没有需要补偿或额外加量的证据，优先保持可重复。", evidence=[f"今天 {steps} 步"], urgency=20, benefit=48, confidence=modules["movement"]["confidence"]))
+        elif sleep_hours is not None and 7 <= sleep_hours <= 9:
+            candidates.append(_action_candidate("maintain", f"继续保留约 {sleep_hours:g} 小时睡眠窗口", "明晚", "当前恢复记录稳定，先维持既有作息。", evidence=[f"睡眠 {sleep_hours:g} 小时"], urgency=20, benefit=48, confidence=modules["recovery"]["confidence"]))
+        elif meals:
+            candidates.append(_action_candidate("maintain", f"继续保留今天 {meals} 餐的记录节奏", "明天", "已有饮食事实可供比较，继续记录主要餐食即可。", evidence=[f"今天记录 {meals} 餐"], urgency=18, benefit=42, confidence=modules["nutrition"]["confidence"]))
+        else:
+            candidates.append(_action_candidate("record", "记录明天最容易完成的一项", "明天", "当前没有足够事实生成个性化行动，先补一条真实记录。", evidence=[f"今天共 {len(events)} 条记录"], urgency=15, benefit=35, confidence=1.0))
+    return _rank_action_candidates(_safety_filter_actions(candidates, urgent=bool(urgent)))
 
 
 def _daily_summary(score: int | None, status: str, confidence: float, modules: dict[str, Any], missing: list[str], urgent: list[dict[str, Any]]) -> dict[str, Any]:
+    candidates: list[tuple[float, int, str, str]] = []
     if urgent:
-        headline = "今天先关注安全信号"
+        candidates.append((1000, 0, "今天先关注安全信号", "urgent_signal"))
+    nutrition = modules["nutrition"]
+    calorie_ratio = nutrition["metrics"].get("calorie_ratio")
+    if calorie_ratio is not None and calorie_ratio >= 1.2:
+        candidates.append(((calorie_ratio - 1) * 120 * nutrition["confidence"], 10, "今天能量摄入偏高，明天回到日常节奏即可", "largest_target_deviation"))
+    protein_ratio = nutrition["metrics"].get("protein_ratio")
+    if protein_ratio is not None and protein_ratio >= 1.6:
+        candidates.append(((protein_ratio - 1) * 70 * nutrition["confidence"], 20, "今天蛋白质已明显超过目标，下一餐正常均衡即可", "largest_target_deviation"))
+    recovery = modules["recovery"]
+    sleep_hours = recovery["metrics"].get("sleep_hours")
+    if sleep_hours is not None and sleep_hours < 6:
+        candidates.append(((7 - sleep_hours) * 35 * recovery["confidence"], 30, "今天最需要关注的是恢复，不必额外加量", "strongest_recovery_signal"))
+    body = modules["body"]
+    body_deviation = body["metrics"].get("deviation_ratio")
+    if body_deviation is not None and body_deviation >= 0.03:
+        candidates.append((body_deviation * 900 * body["confidence"], 40, "今天的身体数据偏离近期基线，先复测再判断", "personal_baseline_deviation"))
+    movement = modules["movement"]
+    steps = movement["metrics"].get("steps", 0)
+    duration = movement["metrics"].get("duration_min", 0)
+    if steps >= 8000 or duration >= 30:
+        if duration and steps:
+            activity_detail = f"活动 {duration:g} 分钟、{steps} 步"
+        elif duration:
+            activity_detail = f"活动 {duration:g} 分钟"
+        else:
+            activity_detail = f"走了 {steps} 步"
+        if sleep_hours is not None and sleep_hours < 7:
+            movement_headline = f"今天{activity_detail}，完成得不错；睡眠还可以再补一点"
+        else:
+            movement_headline = f"今天{activity_detail}，完成得不错，明天按相近节奏继续即可"
+        candidates.append((25 * movement["confidence"], 50, movement_headline, "strongest_positive_signal"))
+    if candidates:
+        _, _, headline, headline_basis = sorted(candidates, key=lambda item: (-item[0], item[1], item[2]))[0]
     elif score is None:
-        headline = "数据还不足，先不评价好坏"
+        headline, headline_basis = "数据还不足，先不评价好坏", "insufficient_evidence"
     elif status == "green":
-        headline = "今天整体在稳定区间"
+        headline, headline_basis = "今天整体在稳定区间", "overall_status"
     elif status == "yellow":
-        headline = "今天有轻度偏移，适合小幅调整"
+        headline, headline_basis = "今天有轻度偏移，适合小幅调整", "overall_status"
     else:
-        headline = "今天有需要优先关注的部分"
+        headline, headline_basis = "今天有需要优先关注的部分", "overall_status"
     available = [module for module in modules.values() if module["score"] is not None]
     best = max(available, key=lambda item: item["score"])["summary"] if available else "暂无足够证据"
-    return {"headline": headline, "best_signal": best, "missing_count": len(missing), "confidence_label": _confidence_label(confidence)}
+    return {"headline": headline, "headline_basis": headline_basis, "best_signal": best, "missing_count": len(missing), "confidence_label": _confidence_label(confidence)}
 
 
 def _movement_structure(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -997,6 +1095,59 @@ def _insight(kind: str, severity: str, title: str, explanation: str, evidence: l
 
 def _action(kind: str, title: str, timing: str, rationale: str) -> dict[str, str]:
     return {"type": kind, "title": title, "timing": timing, "rationale": rationale}
+
+
+def _action_candidate(
+    kind: str,
+    title: str,
+    timing: str,
+    rationale: str,
+    *,
+    evidence: list[str],
+    urgency: int,
+    benefit: int,
+    confidence: float,
+    safety: str = "standard",
+) -> dict[str, Any]:
+    priority = round(urgency * 0.45 + benefit * 0.35 + max(0.0, min(confidence, 1.0)) * 20, 2)
+    return {
+        "type": kind,
+        "title": title,
+        "timing": timing,
+        "rationale": rationale,
+        "evidence": evidence,
+        "safety": safety,
+        "priority": priority,
+        "confidence": round(max(0.0, min(confidence, 1.0)), 3),
+    }
+
+
+def _safety_filter_actions(actions: list[dict[str, Any]], *, urgent: bool) -> list[dict[str, Any]]:
+    """Remove advice that could conflict with a stronger safety signal."""
+    filtered = []
+    for action in actions:
+        if urgent and action["type"] in {"movement", "maintain"}:
+            continue
+        rationale = action["rationale"]
+        prohibited = ("极端节食", "补偿性运动", "自行停药", "自行加药")
+        if any(term in action["title"] for term in prohibited):
+            continue
+        if action["safety"] == "avoid_compensation" and "不需要补偿性" not in rationale:
+            continue
+        filtered.append(action)
+    return filtered
+
+
+def _rank_action_candidates(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for action in actions:
+        previous = unique.get(action["title"])
+        if previous is None or action["priority"] > previous["priority"]:
+            unique[action["title"]] = action
+    return sorted(
+        unique.values(),
+        key=lambda item: (-item["priority"], item["type"], item["title"]),
+    )
 
 
 def _unique_actions(actions: list[dict[str, str]]) -> list[dict[str, str]]:

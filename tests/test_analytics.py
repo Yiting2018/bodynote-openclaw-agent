@@ -136,6 +136,102 @@ class AnalyticsTest(unittest.TestCase):
         self.assertTrue({"食物多样性", "能量目标", "蛋白质目标"}.issubset(nutrition_labels))
         self.assertEqual(result["modules"]["movement"]["metrics"]["strength_volume_kg"], 2000)
 
+    def test_nutrition_completeness_does_not_become_health_score(self) -> None:
+        for hour, payload in (
+            (8, {"meal_type": "breakfast", "foods": ["燕麦", "牛奶"], "calories_kcal": 600, "protein_g": 30}),
+            (12, {"meal_type": "lunch", "foods": ["米饭", "鸡肉"], "calories_kcal": 800, "protein_g": 50}),
+            (19, {"meal_type": "dinner", "foods": ["面", "鱼"], "calories_kcal": 900, "protein_g": 60}),
+        ):
+            self.record("meal", f"2026-07-16T{hour:02d}:00:00+08:00", payload)
+
+        result = self.analytics.analyze("daily", "2026-07-16")
+
+        nutrition = result["modules"]["nutrition"]
+        self.assertIsNone(nutrition["score"])
+        self.assertGreaterEqual(nutrition["metrics"]["data_quality_score"], 80)
+        self.assertIn("暂不评价", nutrition["summary"])
+
+    def test_body_measurement_without_personal_baseline_has_unknown_state(self) -> None:
+        self.record("body", "2026-07-16T08:00:00+08:00", {"weight_kg": 62.1})
+        result = self.analytics.analyze("daily", "2026-07-16")
+        body = result["modules"]["body"]
+        self.assertIsNone(body["score"])
+        self.assertEqual(body["status"], "unknown")
+        self.assertGreater(body["confidence"], 0)
+        self.assertIn("基线积累中", body["summary"])
+
+    def test_body_state_uses_personal_baseline_after_enough_measurements(self) -> None:
+        for day, weight in ((13, 62.0), (14, 62.1), (15, 62.0), (16, 65.0)):
+            self.record("body", f"2026-07-{day:02d}T08:00:00+08:00", {"weight_kg": weight})
+        result = self.analytics.analyze("daily", "2026-07-16")
+        body = result["modules"]["body"]
+        self.assertIsNotNone(body["score"])
+        self.assertLessEqual(body["score"], 72)
+        self.assertIn("个人基线", body["summary"])
+
+    def test_action_pipeline_exposes_evidence_safety_and_priority(self) -> None:
+        OnboardingService(self.database).configure({"profile": {"daily_calorie_target_kcal": 2000}})
+        self.record("meal", "2026-07-16T19:00:00+08:00", {"meal_type": "dinner", "foods": ["披萨"], "calories_kcal": 2800})
+        result = self.analytics.analyze("daily", "2026-07-16")
+        actions = result["actions"]
+        self.assertTrue(actions)
+        self.assertTrue(all(action["evidence"] for action in actions))
+        self.assertTrue(all("safety" in action and "priority" in action for action in actions))
+        self.assertEqual([a["priority"] for a in actions], sorted((a["priority"] for a in actions), reverse=True))
+
+    def test_same_input_produces_same_score_headline_and_actions(self) -> None:
+        self.record("exercise", "2026-07-16T18:00:00+08:00", {"activity": "walking", "steps": 9000})
+        first = self.analytics.analyze("daily", "2026-07-16")
+        second = self.analytics.analyze("daily", "2026-07-16")
+        self.assertEqual(first["health_score"], second["health_score"])
+        self.assertEqual(first["summary"], second["summary"])
+        self.assertEqual(first["actions"], second["actions"])
+
+    def test_activity_headline_uses_actual_data_instead_of_vague_stability_copy(self) -> None:
+        self.record("exercise", "2026-07-16T18:00:00+08:00", {"activity": "walking", "steps": 9200, "duration_min": 48})
+        self.record("sleep", "2026-07-16T07:00:00+08:00", {"duration_hours": 6.4})
+        result = self.analytics.analyze("daily", "2026-07-16")
+        headline = result["summary"]["headline"]
+        self.assertIn("48 分钟", headline)
+        self.assertIn("9200 步", headline)
+        self.assertIn("睡眠还可以再补一点", headline)
+        self.assertNotIn("优先保持稳定", headline)
+
+    def test_large_nutrition_target_deviation_is_not_green(self) -> None:
+        OnboardingService(self.database).configure(
+            {
+                "profile": {
+                    "daily_calorie_target_kcal": 2200,
+                    "daily_protein_target_g": 130,
+                }
+            }
+        )
+        foods = (["燕麦", "牛奶"], ["米饭", "鸡肉"], ["酸奶", "坚果"], ["意面", "三文鱼"])
+        values = ((900, 70), (1400, 110), (590, 42), (1800, 120))
+        for hour, meal_type, meal_foods, (calories, protein) in zip(
+            (8, 12, 15, 19),
+            ("breakfast", "lunch", "snack", "dinner"),
+            foods,
+            values,
+        ):
+            self.record(
+                "meal",
+                f"2026-07-16T{hour:02d}:00:00+08:00",
+                {
+                    "meal_type": meal_type,
+                    "foods": list(meal_foods),
+                    "calories_kcal": calories,
+                    "protein_g": protein,
+                },
+            )
+
+        result = self.analytics.analyze("daily", "2026-07-16")
+
+        self.assertNotEqual(result["status"], "green")
+        self.assertLessEqual(result["health_score"], 79)
+        self.assertIn("能量摄入偏高", result["summary"]["headline"])
+        self.assertTrue(any(action["type"] == "nutrition" for action in result["actions"]))
+
     def test_weekly_model_has_structure_and_trend(self) -> None:
         for day in range(10, 17):
             self.record(

@@ -1,0 +1,7 @@
+[
+  {"text":"1 小时前吃午饭","now":"2026-07-19T23:00:00+08:00","event_type":"meal","occurred_at":"2026-07-19T22:00:00+08:00","handler":"MealHandler"},
+  {"text":"早饭 7 点 15 吃了燕麦","now":"2026-07-19T23:00:00+08:00","event_type":"meal","occurred_at":"2026-07-19T07:15:00+08:00","handler":"MealHandler"},
+  {"text":"刚才吃了三文鱼","now":"2026-07-19T23:00:00+08:00","event_type":"meal","occurred_at":"2026-07-19T23:00:00+08:00","handler":"MealHandler"},
+  {"text":"昨晚睡了7.2小时","now":"2026-07-19T23:10:00+08:00","event_type":"sleep","occurred_at":"2026-07-19T00:00:00+08:00","handler":"SleepHandler"},
+  {"text":"今天很早体重62.5kg","now":"2026-07-19T12:00:00+08:00","event_type":"body","occurred_at":"2026-07-19T06:30:00+08:00","handler":"BodyHandler"}
+]

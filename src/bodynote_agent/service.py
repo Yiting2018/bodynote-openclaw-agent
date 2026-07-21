@@ -7,7 +7,9 @@ from uuid import uuid4
 
 from bodynote_agent.events import EventInput, EventRepository
 from bodynote_agent.food_library import FoodLibraryService
+from bodynote_agent.handlers.correction import parse_correction
 from bodynote_agent.parsing import ParseError, parse_checkin_text
+from bodynote_agent.time_utils import infer_occurred_at
 from bodynote_agent.validation import validate_event
 
 
@@ -24,13 +26,33 @@ class CheckinService:
         source_context: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         now: datetime | None = None,
+        occurred_at: str | None = None,
     ) -> dict[str, Any]:
+        correction = parse_correction(text)
+        if correction is not None:
+            return self._apply_correction(correction, text=text, now=now)
         try:
             parsed = parse_checkin_text(text, now=now)
         except ParseError as error:
             return {"ok": False, "recorded": False, "error": str(error)}
 
-        payload = self._enrich_meal(parsed.event_type, parsed.payload, text)
+        resolved_occurred_at = occurred_at or parsed.occurred_at
+        if occurred_at:
+            occurred_error = _occurred_at_error(occurred_at)
+            if occurred_error:
+                return {"ok": False, "recorded": False, "errors": [occurred_error]}
+        parsed_payload = dict(parsed.payload)
+        if occurred_at:
+            parsed_payload["occurred_at_source"] = "explicit_override"
+        payload = self._enrich_meal(parsed.event_type, parsed_payload, text)
+        route = {
+            "intent": parsed.intent,
+            "event_type": parsed.event_type,
+            "handler": parsed.handler,
+            "required_fields": list(parsed.required_fields),
+            "confidence": parsed.confidence,
+            "ambiguities": list(parsed.ambiguities),
+        }
         validation = validate_event(parsed.event_type, payload)
         if not validation.ok:
             return {
@@ -39,6 +61,7 @@ class CheckinService:
                 "event_type": parsed.event_type,
                 "errors": list(validation.errors),
                 "follow_up_question": parsed.follow_up_question or validation.follow_up_question,
+                "route": route,
             }
 
         request_id = idempotency_key or f"req_{uuid4().hex}"
@@ -46,7 +69,7 @@ class CheckinService:
         event, duplicate = self.repository.create(
             EventInput(
                 event_type=parsed.event_type,
-                occurred_at=parsed.occurred_at,
+                occurred_at=resolved_occurred_at,
                 payload=validation.payload,
                 source=source,
                 source_context=source_context or {},
@@ -64,6 +87,7 @@ class CheckinService:
             duplicate=duplicate,
             follow_up=parsed.follow_up_question or validation.follow_up_question,
             warnings=warnings,
+            route=route,
         )
 
     def record_structured(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -188,6 +212,69 @@ class CheckinService:
             return {"ok": False, "deleted": False, "error": "记录不存在或已经删除。"}
         return {"ok": True, "deleted": True, "event_id": event_id}
 
+    def _apply_correction(
+        self,
+        command: Any,
+        *,
+        text: str,
+        now: datetime | None,
+    ) -> dict[str, Any]:
+        if command.ambiguities:
+            return {
+                "ok": False,
+                "recorded": False,
+                "intent": "correct_event",
+                "handler": "CorrectionHandler",
+                "ambiguities": list(command.ambiguities),
+                "follow_up_question": "需要修改哪项内容？请补充数值、餐次或时间。",
+            }
+        target = self.repository.latest_created(event_type=command.target_event_type)
+        if target is None:
+            return {
+                "ok": False,
+                "recorded": False,
+                "intent": "correct_event",
+                "handler": "CorrectionHandler",
+                "ambiguities": ["target_event_not_found"],
+                "follow_up_question": "没有找到可修正的对应记录，请说明要修改哪一条。",
+            }
+        if command.action == "delete":
+            deleted = self.delete_event(target["id"])
+            return {
+                **deleted,
+                "recorded": False,
+                "corrected": deleted.get("deleted", False),
+                "intent": "delete_event",
+                "handler": "CorrectionHandler",
+                "target_event": target,
+                "confidence": command.confidence,
+                "ambiguities": [],
+            }
+        patch: dict[str, Any] = {
+            "payload": command.payload_patch,
+            "raw_text": text,
+            "confidence": command.confidence,
+        }
+        if command.occurred_at_text:
+            corrected_at, source = infer_occurred_at(
+                command.occurred_at_text,
+                now=now,
+                event_type=target["event_type"],
+            )
+            patch["occurred_at"] = corrected_at
+            patch["payload"] = {**command.payload_patch, "occurred_at_source": f"correction_{source}"}
+        updated = self.update_event(target["id"], patch)
+        return {
+            **updated,
+            "recorded": False,
+            "corrected": updated.get("updated", False),
+            "intent": "correct_event",
+            "handler": "CorrectionHandler",
+            "target_event_id": target["id"],
+            "confidence": command.confidence,
+            "ambiguities": [],
+        }
+
     def _enrich_meal(
         self, event_type: str, payload: dict[str, Any], raw_text: str
     ) -> dict[str, Any]:
@@ -202,6 +289,7 @@ class CheckinService:
         duplicate: bool,
         follow_up: str | None,
         warnings: list[str],
+        route: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         safety = None
         if "safety_attention_required" in warnings or any(item.startswith("urgent_") for item in warnings):
@@ -209,7 +297,7 @@ class CheckinService:
                 "level": "urgent",
                 "message": "这条记录包含需要优先关注的信号。如症状严重、突然出现或持续加重，请及时联系当地急救或医疗机构。",
             }
-        return {
+        result = {
             "ok": True,
             "recorded": True,
             "duplicate": duplicate,
@@ -219,6 +307,9 @@ class CheckinService:
             "warnings": warnings,
             "safety": safety,
         }
+        if route:
+            result["route"] = route
+        return result
 
 
 def _event_summary(event: dict[str, Any]) -> str:
@@ -244,6 +335,10 @@ def _event_summary(event: dict[str, Any]) -> str:
         return f"已记录症状：{payload.get('label') or payload['symptom']}。"
     if event_type == "menstrual_cycle":
         return "已记录生理周期信息。"
+    if event_type == "medical_report":
+        findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+        actions = payload.get("action_candidates") if isinstance(payload.get("action_candidates"), list) else []
+        return f"已记录{payload.get('report_type', '医疗报告')}：{len(findings)} 项需关注，{len(actions)} 项后续建议。"
     return f"已记录 {event_type}。"
 
 

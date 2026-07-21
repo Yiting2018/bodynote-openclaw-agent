@@ -116,6 +116,21 @@ class TrendAnalysisTest(unittest.TestCase):
         self.assertTrue(gap["cycle_forecast"]["reminder_due"])
         self.assertIn("经期", gap["prompt"])
 
+    def test_cycle_support_prefers_phase_matched_personal_history(self) -> None:
+        for started in ("2026-03-27", "2026-04-24", "2026-05-22", "2026-06-19"):
+            self.record("menstrual_cycle", f"{started}T08:00:00+08:00", {"phase": "menstrual", "cycle_day": 1, "period_started": True})
+        for day, weight in (("2026-04-21", 62.5), ("2026-05-19", 62.6), ("2026-06-16", 62.4), ("2026-07-14", 63.3)):
+            self.record("body", f"{day}T07:30:00+08:00", {"weight_kg": weight})
+        result = TrendAnalysisService(self.database).analyze(
+            "2026-07-14",
+            timezone_name="Asia/Shanghai",
+            profile=self.onboarding.status()["profile"],
+        )
+        support = result["cycle"]["support"]
+        self.assertEqual(support["evidence"], "personal")
+        self.assertIn("过去 3 个周期相近阶段", support["note"])
+        self.assertIn("水分波动", support["note"])
+
     def test_reference_library_keeps_structured_notes(self) -> None:
         library = ReferenceLibraryService(self.database)
         added = library.add(

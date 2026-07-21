@@ -272,8 +272,8 @@ def _dimension_score_summary(
 ) -> list[dict[str, Any]]:
     definitions = (
         ("activity_score", "活动", "活动频率、时长、抗阻容量与强度"),
-        ("nutrition_score", "饮食", "能量、营养素、记录覆盖与食物多样性"),
-        ("body_score", "身体状态", "身体测量覆盖与异常波动复核"),
+        ("nutrition_score", "饮食", "相对个人能量与营养目标；记录覆盖只影响置信度"),
+        ("body_score", "身体状态", "相对个人基线的波动复核；测量覆盖只影响置信度"),
         ("recovery_score", "恢复与感受", "睡眠、疲劳、症状与主观感受"),
     )
     result = []
@@ -310,10 +310,11 @@ def _cycle_support(
             "note": forecast.get("message", "继续记录经期开始日期和主要感受。"),
             "action": "当前不根据周期调整训练或饮食计划。",
         }
+    comparisons = _phase_matched_comparisons(forecast, daily, reference)
     recent_days = _dates(reference - timedelta(days=4), reference)
     baseline_days = _dates(reference - timedelta(days=18), reference - timedelta(days=5))
-    comparisons = []
     for key, label, unit in (
+        ("weight_kg", "体重", "kg"),
         ("strength_volume_kg", "抗阻容量", "kg"),
         ("exercise_min", "活动时长", "分钟"),
         ("carbs_g", "碳水记录", "g"),
@@ -327,18 +328,23 @@ def _cycle_support(
         recent_average, baseline_average = mean(recent), mean(baseline)
         if not baseline_average:
             continue
+        if key == "weight_kg":
+            change_kg = round(recent_average - baseline_average, 2)
+            if abs(change_kg) >= 0.3:
+                comparisons.append(f"近5天{label}较个人前期基线{change_kg:+g} kg")
+            continue
         change = round((recent_average - baseline_average) / abs(baseline_average) * 100)
         if abs(change) >= 8:
             comparisons.append(f"近5天{label}较个人前期基线{change:+d}%")
     phase = forecast.get("estimated_phase")
     if phase == "luteal":
-        general = "优先保证总能量、碳水可用性、蛋白质与补水；是否调整训练强度以个人感受和历史表现为准。"
+        general = "部分人此时会有腹胀、短期体重波动或更想吃碳水；这不代表意志力不足。正常安排主食、蛋白质和蔬菜，是否调整训练以个人感受和历史表现为准。"
     elif phase == "menstrual":
-        general = "如疼痛或疲劳明显，可按感受调整训练量；没有不适时无需仅因周期阶段停止训练。"
+        general = "短期体重变化可能与水分有关，不必因单日数字额外节食或加练；如疼痛或疲劳明显，可按感受调整训练量。"
     else:
         general = "保持既定训练与饮食计划，继续记录表现和恢复，为个人周期规律积累证据。"
     if any(token in goal for token in ("增肌", "力量", "抗阻")) and phase == "luteal":
-        general = "增肌目标下先保证训练日前后的碳水、蛋白质和总能量；不因阶段标签自动降低训练强度。"
+        general = "部分人此时会有腹胀、短期体重波动或更想吃碳水；这不代表意志力不足。增肌目标下正常保证训练日前后的碳水、蛋白质和总能量，不因阶段标签自动降低训练强度。"
     return {
         "visible": True,
         "evidence": "personal" if comparisons else "general",
@@ -346,6 +352,59 @@ def _cycle_support(
         "note": "；".join(comparisons[:2]) if comparisons else "个人阶段表现样本仍不足，当前仅显示一般参考。",
         "action": general,
     }
+
+
+def _phase_matched_comparisons(
+    forecast: dict[str, Any],
+    daily: dict[str, dict[str, Any]],
+    reference: date,
+) -> list[str]:
+    """Compare today with the same personal cycle window in earlier cycles."""
+    last_start_text = forecast.get("last_period_start")
+    typical = int(forecast.get("typical_cycle_days") or 0)
+    cycle_day = int(forecast.get("current_cycle_day") or 0)
+    if not last_start_text or not 15 <= typical <= 60 or cycle_day < 1:
+        return []
+    last_start = date.fromisoformat(str(last_start_text))
+    current_center = last_start + timedelta(days=cycle_day - 1)
+    if abs((current_center - reference).days) > 3:
+        current_center = reference
+    results = []
+    for key, label, unit in (
+        ("weight_kg", "体重", "kg"),
+        ("carbs_g", "碳水", "g"),
+        ("sleep_hours", "睡眠", "小时"),
+        ("fatigue", "疲劳", "/10"),
+        ("exercise_min", "活动时长", "分钟"),
+    ):
+        current_values = [
+            float(daily[day][key])
+            for day in _dates(current_center - timedelta(days=2), current_center + timedelta(days=2))
+            if _number(daily.get(day, {}).get(key)) is not None
+        ]
+        historical_cycle_values = []
+        for cycle_index in range(1, 4):
+            center = current_center - timedelta(days=typical * cycle_index)
+            values = [
+                float(daily[day][key])
+                for day in _dates(center - timedelta(days=2), center + timedelta(days=2))
+                if _number(daily.get(day, {}).get(key)) is not None
+            ]
+            if values:
+                historical_cycle_values.append(mean(values))
+        if not current_values or len(historical_cycle_values) < 2:
+            continue
+        current_average = mean(current_values)
+        historical_average = mean(historical_cycle_values)
+        if key == "weight_kg":
+            change = current_average - historical_average
+            if abs(change) >= 0.2:
+                results.append(f"过去 {len(historical_cycle_values)} 个周期相近阶段体重均值约 {historical_average:.1f} kg，本次{change:+.1f} kg，更可能先按短期水分波动观察")
+        elif historical_average:
+            change_pct = round((current_average - historical_average) / abs(historical_average) * 100)
+            if abs(change_pct) >= 10:
+                results.append(f"过去 {len(historical_cycle_values)} 个周期相近阶段{label}均值约 {historical_average:.1f}{unit}，本次{change_pct:+d}%")
+    return results
 
 
 def _summaries(days: list[str], daily: dict[str, dict[str, Any]]) -> dict[str, float | None]:

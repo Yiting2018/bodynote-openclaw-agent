@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS schedule_preferences (
     weekly_report_time TEXT NOT NULL DEFAULT '21:30',
     monthly_report_policy TEXT NOT NULL DEFAULT 'last_day',
     monthly_report_time TEXT NOT NULL DEFAULT '21:30',
-    output_formats_json TEXT NOT NULL DEFAULT '["html","png","pdf"]',
+    output_formats_json TEXT NOT NULL DEFAULT '["png"]',
     required_daily_fields_json TEXT NOT NULL DEFAULT '["movement","nutrition","body","recovery"]',
     not_applicable_daily_fields_json TEXT NOT NULL DEFAULT '[]',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

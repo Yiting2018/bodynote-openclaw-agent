@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-07-21
+
+- Add registered domain Handler contracts plus dedicated medical-report and natural-language correction routing.
+- Correct occurrence-time priority, completed-sleep date semantics, fuzzy-time disclosure, and explicit time overrides.
+- Separate health state from data confidence; use personal targets and baselines instead of record completeness or fixed body scores.
+- Build deterministic evidence-based action candidates with safety filtering and priority ranking.
+- Personalize cycle support from phase-matched history without prescribing exercise from a phase label alone.
+- Generate evidence-specific daily headlines and a single adaptive-height mobile PNG with the complete timeline.
+- Auto-migrate existing runtimes on normal commands and add Graywind, migration, determinism, correction, and visual regressions.
+
 ## 0.2.0 - 2026-07-18
 
 - Add a local personal food library for reusable foods, branded products, supplements, aliases, and verified nutrition per serving.

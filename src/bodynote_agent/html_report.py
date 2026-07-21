@@ -98,7 +98,7 @@ def render_report_html(
 def _snapshot_section(model: dict[str, Any], events: list[dict[str, Any]]) -> str:
     if model["period_type"] == "daily":
         metrics = _daily_metrics(events)
-        timeline = "".join(_event_html(event) for event in events[:6])
+        timeline = "".join(_event_html(event) for event in events)
         if not timeline:
             timeline = '<div class="metric"><span>今天暂无记录</span><b>等待发生</b><small>未记录不等于异常。</small></div>'
         cards = "".join(
@@ -163,7 +163,17 @@ def _event_html(event: dict[str, Any]) -> str:
         "body": "var(--cyan)", "mood": "var(--coral)", "symptom": "var(--coral)",
         "menstrual_cycle": "var(--violet)",
     }.get(event["event_type"], "var(--cyan)")
-    return f'<article class="event" style="--event-color:{color}"><time>{html.escape(event["occurred_at"][11:16])}</time><div class="rail"><i></i></div><div><h3>{html.escape(EVENT_LABELS.get(event["event_type"], event["event_type"]))} · {html.escape(event_summary(event))}</h3><p>{html.escape(event.get("raw_text") or f"来源：{event.get("source") or "本地记录"}")}</p></div></article>'
+    return f'<article class="event" style="--event-color:{color}"><time>{html.escape(event_time_label(event))}</time><div class="rail"><i></i></div><div><h3>{html.escape(EVENT_LABELS.get(event["event_type"], event["event_type"]))} · {html.escape(event_summary(event))}</h3><p>{html.escape(event.get("raw_text") or f"来源：{event.get("source") or "本地记录"}")}</p></div></article>'
+
+
+def event_time_label(event: dict[str, Any]) -> str:
+    payload = event.get("payload") or {}
+    if event.get("event_type") == "sleep" and (
+        payload.get("occurred_at_source") == "sleep_wake_date"
+        or payload.get("sleep_date")
+    ):
+        return "昨夜"
+    return str(event.get("occurred_at") or "")[11:16] or "--:--"
 
 
 def event_summary(event: dict[str, Any]) -> str:
@@ -201,6 +211,16 @@ def event_summary(event: dict[str, Any]) -> str:
         if payload.get("cycle_day"):
             parts.append(f"第 {payload['cycle_day']} 天")
         return " · ".join(parts)
+    if event_type == "medical_report":
+        report_type = str(payload.get("report_type") or "医疗报告")
+        findings = payload.get("findings") or payload.get("abnormal_items") or []
+        actions = payload.get("action_candidates") or []
+        parts = [report_type]
+        if isinstance(findings, list) and findings:
+            parts.append(f"{len(findings)} 项需关注")
+        if isinstance(actions, list) and actions:
+            parts.append(f"{len(actions)} 项后续建议")
+        return " · ".join(parts)
     return " · ".join(f"{key}: {value}" for key, value in list(payload.items())[:3]) or "已记录"
 
 
@@ -211,7 +231,7 @@ def _module_section(model: dict[str, Any]) -> str:
 
 def _module_html(module: dict[str, Any]) -> str:
     basis = "".join(
-        f'<i>{html.escape(str(item["label"]))} {item["score"]} · {html.escape(str(item["evidence"]))}</i>'
+        f'<i>{html.escape(str(item["label"]))} {item["score"] if item["score"] is not None else "--"} · {html.escape(str(item["evidence"]))}</i>'
         for item in module.get("basis", [])
     ) or "<i>评分证据积累中</i>"
     score = module["score"] if module["score"] is not None else "--"

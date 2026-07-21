@@ -21,6 +21,17 @@ The response declares available capabilities. Invoke only listed capabilities. T
 
 ## Check-In Command Contract
 
+BodyNote uses one OpenClaw conversation agent, one deterministic intent router,
+and domain handlers such as `MealHandler`, `ExerciseHandler`, `SleepHandler`,
+`BodyHandler`, and `CycleHandler`. Handlers extract domain fields; shared services
+own time resolution, validation, safety rules, persistence, scoring, and reports.
+Do not create a separate autonomous language-model agent for every health domain.
+
+For completed sleep, distinguish the message time from the sleep date. A natural
+language record such as “昨晚睡了 7 小时” belongs to the day the owner woke up and
+must be rendered as “昨夜睡眠”, not with the message's late-evening clock. A future
+statement such as “今晚想睡 8 小时” is a plan and must not be saved as completed sleep.
+
 Record natural-language text. Always use the stable OpenClaw message id as the idempotency key:
 
 ```bash
@@ -29,6 +40,13 @@ bodynote-agent checkin \
   --source openclaw \
   --idempotency-key "<channel>:<message-id>" \
   --json
+```
+
+When the owner gives an exact occurrence time outside the sentence, pass it as
+an ISO 8601 override instead of rewriting the text:
+
+```bash
+bodynote-agent checkin --text "吃了三文鱼" --at "2026-07-16T18:25:00+08:00" --json
 ```
 
 Record a structured event from a local JSON file:

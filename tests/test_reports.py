@@ -7,6 +7,7 @@ from pathlib import Path
 
 from bodynote_agent.preferences import OnboardingService
 from bodynote_agent.food_library import FoodLibraryService
+from bodynote_agent.html_report import event_summary, event_time_label
 from bodynote_agent.reports import ReportService, _pdf_period_details
 from bodynote_agent.runtime import initialize
 from bodynote_agent.service import CheckinService
@@ -155,9 +156,68 @@ class ReportTest(unittest.TestCase):
         png_path = Path(result["artifacts"]["png"]["path"])
         pdf_path = Path(result["artifacts"]["pdf"]["path"])
         with Image.open(png_path) as image:
-            self.assertEqual(image.size, (1080, 1920))
+            self.assertEqual(image.width, 1080)
+            self.assertGreaterEqual(image.height, 1920)
         self.assertTrue(pdf_path.read_bytes().startswith(b"%PDF"))
         self.assertGreater(pdf_path.stat().st_size, 2500)
+
+    def test_daily_png_is_one_adaptive_long_image_with_all_events(self) -> None:
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow is not installed in this interpreter")
+        checkins = CheckinService(self.database)
+        for minute in range(4):
+            result = checkins.record_structured(
+                {
+                    "event_type": "mood",
+                    "occurred_at": f"2026-07-16T20:{minute:02d}:00+08:00",
+                    "payload": {"mood": "calm", "intensity": 5},
+                }
+            )
+            self.assertTrue(result["ok"], result)
+
+        legacy_page = self.reports_root / "daily" / "2026-07-16" / "report-2.png"
+        legacy_page.parent.mkdir(parents=True, exist_ok=True)
+        legacy_page.write_bytes(b"old continuation")
+
+        generated = self.service.generate("daily", "2026-07-16", formats=["png"])
+
+        self.assertIn("png", generated["artifacts"])
+        self.assertNotIn("png_2", generated["artifacts"])
+        self.assertEqual(len(generated["attachments"]), 1)
+        self.assertFalse(legacy_page.exists())
+        from PIL import Image, ImageStat
+
+        with Image.open(generated["artifacts"]["png"]["path"]) as image:
+            self.assertEqual(image.width, 1080)
+            self.assertGreater(image.height, 1920)
+            lower_content = image.crop((40, int(image.height * 0.72), 1040, image.height - 40))
+            self.assertGreater(sum(ImageStat.Stat(lower_content).var), 1.0)
+
+    def test_sleep_and_medical_timeline_use_human_summary(self) -> None:
+        sleep = {
+            "event_type": "sleep",
+            "occurred_at": "2026-07-16T00:00:00+08:00",
+            "payload": {
+                "duration_hours": 7.2,
+                "sleep_date": "2026-07-16",
+                "occurred_at_source": "sleep_wake_date",
+            },
+        }
+        medical = {
+            "event_type": "medical_report",
+            "occurred_at": "2026-07-16T11:00:00+08:00",
+            "payload": {
+                "report_type": "体检报告",
+                "findings": [{"name": "尿酸"}, {"name": "胆固醇"}],
+                "action_candidates": ["复查"],
+            },
+        }
+
+        self.assertEqual(event_time_label(sleep), "昨夜")
+        self.assertEqual(event_summary(medical), "体检报告 · 2 项需关注 · 1 项后续建议")
+        self.assertNotIn("findings", event_summary(medical))
 
     def test_scheduled_monthly_report_only_runs_on_local_month_end(self) -> None:
         skipped = self.service.generate(
